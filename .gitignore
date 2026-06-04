@@ -1,0 +1,16 @@
+# Xcode
+DerivedData/
+build/
+
+# User data
+xcuserdata/
+*.xcuserstate
+
+# Secrets
+.env
+.env.*
+Secrets.plist
+
+# Signing
+*.p12
+*.mobileprovision
