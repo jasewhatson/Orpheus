@@ -1,0 +1,5 @@
+# The server runs on the Python standard library alone.
+# This single optional dependency enables reading embedded tags (title /
+# artist / album / duration) and cover art from audio files. Without it the
+# server still works and derives artist/title from filenames.
+mutagen>=1.47
