@@ -93,7 +93,13 @@ enum Catalog {
     static let tracks: [String: Track] = {
         var d: [String: Track] = [:]
         for (id, title, artistId, albumId, dur) in trackDefs {
-            d[id] = Track(id: id, title: title, artistId: artistId, albumId: albumId, dur: dur)
+            let alb = albums[albumId]
+            d[id] = Track(id: id, title: title,
+                          artist: artists[artistId]?.name ?? "Unknown Artist",
+                          album: alb?.title,
+                          dur: Double(dur),
+                          cover: alb?.cover ?? .placeholder,
+                          artistId: artistId, albumId: albumId)
         }
         return d
     }()
@@ -123,8 +129,7 @@ enum Catalog {
     static func artist(_ id: String) -> Artist { artists[id] ?? artists["lumora"]! }
     static func album(_ id: String) -> Album { albums[id]! }
     static func track(_ id: String) -> Track { tracks[id]! }
-    static func artistName(_ t: Track) -> String { artist(t.artistId).name }
-    static func albumOf(_ t: Track) -> Album { album(t.albumId) }
+    static func artistName(_ t: Track) -> String { t.artist }
 
     // MARK: helpers
 

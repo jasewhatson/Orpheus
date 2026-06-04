@@ -26,17 +26,23 @@ struct SearchScreen: View {
 
     private var q: String { query.trimmingCharacters(in: .whitespaces).lowercased() }
 
+    // Search the server library when configured, otherwise the demo catalog.
+    private var serverMode: Bool { app.settings.serverEnabled }
+
     private var tracks: [Track] {
-        Catalog.tracks.values.filter {
-            $0.title.lowercased().contains(q) || Catalog.artistName($0).lowercased().contains(q)
-        }.sorted { $0.title < $1.title }.prefix(8).map { $0 }
+        let pool = serverMode ? app.serverTracks : Array(Catalog.tracks.values)
+        return pool.filter {
+            $0.title.lowercased().contains(q) || $0.artist.lowercased().contains(q)
+        }.sorted { $0.title < $1.title }.prefix(serverMode ? 30 : 8).map { $0 }
     }
     private var artists: [Artist] {
-        Catalog.artists.values.filter { $0.name.lowercased().contains(q) }
+        guard !serverMode else { return [] }
+        return Catalog.artists.values.filter { $0.name.lowercased().contains(q) }
             .sorted { $0.name < $1.name }.prefix(4).map { $0 }
     }
     private var albums: [Album] {
-        Catalog.albums.values.filter { $0.title.lowercased().contains(q) }
+        guard !serverMode else { return [] }
+        return Catalog.albums.values.filter { $0.title.lowercased().contains(q) }
             .sorted { $0.title < $1.title }.prefix(4).map { $0 }
     }
 
@@ -126,8 +132,14 @@ struct SearchScreen: View {
                 topResult(art: al.cover, title: al.title,
                           sub: "\(al.type) · \(Catalog.artist(al.artistId).name)", circle: false) { app.openAlbum(al.id) }
             } else if let t = tracks.first {
-                let ar = Catalog.artist(t.artistId)
-                topResult(art: ar.artwork, title: ar.name, sub: "Artist", circle: true) { app.openArtist(ar.id) }
+                if let aid = t.artistId {
+                    let ar = Catalog.artist(aid)
+                    topResult(art: ar.artwork, title: ar.name, sub: "Artist", circle: true) { app.openArtist(ar.id) }
+                } else {
+                    topResult(art: t.cover, url: t.artworkURL, title: t.title, sub: t.artist, circle: false) {
+                        app.playTrack(t.id, app.ctx)
+                    }
+                }
             }
 
             if !tracks.isEmpty {
@@ -168,12 +180,12 @@ struct SearchScreen: View {
         }
     }
 
-    private func topResult(art: Artwork, title: String, sub: String, circle: Bool, onTap: @escaping () -> Void) -> some View {
+    private func topResult(art: Artwork, url: URL? = nil, title: String, sub: String, circle: Bool, onTap: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("TOP RESULT").font(.tCap).tracking(0.8).foregroundStyle(pal.text3)
             Button(action: onTap) {
                 VStack(alignment: .leading, spacing: 0) {
-                    Cover(art: art, size: 66, radius: circle ? 33 : 12)
+                    Cover(art: art, url: url, size: 66, radius: circle ? 33 : 12)
                     Text(title).font(.system(size: 21, weight: .heavy)).foregroundStyle(pal.text).padding(.top, 12)
                     Text(sub).font(.tSub).foregroundStyle(pal.text2).padding(.top, 3)
                 }

@@ -76,16 +76,17 @@ struct TrackMenu: View {
     @Environment(\.palette) private var pal
 
     var body: some View {
-        let t = Catalog.track(trackId)
-        let a = Catalog.album(t.albumId)
+        let t = app.track(trackId)
+        let subtitle = [t.artist, t.album].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         let inPlaylist = ctx?.kind == .playlist && !(app.getPlaylist(ctx!.id)?.liked ?? true)
+            && !app.isRemotePlaylist(ctx?.id ?? "")
         AuraSheet(onClose: onClose) { close in
             VStack(spacing: 0) {
                 HStack(spacing: 13) {
-                    Cover(art: a.cover, size: 52, radius: 11)
+                    Cover(art: t.cover, url: t.artworkURL, size: 52, radius: 11)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(t.title).font(.system(size: 16.5, weight: .bold)).foregroundStyle(pal.text).lineLimit(1)
-                        Text("\(Catalog.artistName(t)) · \(a.title)").font(.tSub).foregroundStyle(pal.text2).lineLimit(1)
+                        Text(subtitle).font(.tSub).foregroundStyle(pal.text2).lineLimit(1)
                     }
                     Spacer()
                 }
@@ -101,8 +102,12 @@ struct TrackMenu: View {
                         MenuItem(icon: "next", label: "Play next") { app.playNext(trackId); close() }
                         let dl = app.isDownloaded(trackId)
                         MenuItem(icon: dl ? "downloaded" : "download", label: dl ? "Downloaded" : "Download", accent: dl) { app.toggleDownload(trackId); close() }
-                        MenuItem(icon: "user", label: "Go to artist") { close(); after { app.openArtist(t.artistId) } }
-                        MenuItem(icon: "spinner-disc", label: "Go to album") { close(); after { app.openAlbum(t.albumId) } }
+                        if let aid = t.artistId {
+                            MenuItem(icon: "user", label: "Go to artist") { close(); after { app.openArtist(aid) } }
+                        }
+                        if let alid = t.albumId {
+                            MenuItem(icon: "spinner-disc", label: "Go to album") { close(); after { app.openAlbum(alid) } }
+                        }
                         MenuItem(icon: "share", label: "Share") { app.toast("Shared"); close() }
                         if inPlaylist {
                             MenuItem(icon: "minus-circle", label: "Remove from this playlist", danger: true) { app.removeFromPlaylist(ctx!.id, trackId); close() }
@@ -125,7 +130,7 @@ struct AddToPlaylistMenu: View {
     @Environment(\.palette) private var pal
 
     var body: some View {
-        let t = Catalog.track(trackId)
+        let t = app.track(trackId)
         let lists = orderedPlaylists()
         AuraSheet(onClose: onClose) { close in
             VStack(spacing: 0) {

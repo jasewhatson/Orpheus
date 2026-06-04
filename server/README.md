@@ -65,13 +65,29 @@ All responses include permissive CORS headers (`Access-Control-Allow-Origin: *`)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Server info: `{ name, version, root, playlistCount, mutagen }` |
+| GET | `/health` | Server info: `{ name, version, root, playlistCount, mutagen, ffmpeg }` |
 | GET | `/playlists` | `[{ id, name, trackCount }]` — one per folder |
 | GET | `/playlists/{playlist}` | `{ id, name, tracks: [Track…] }` |
 | GET | `/playlists/{playlist}/tracks/{file}` | a single `Track` |
 | GET | `/playlists/{playlist}/tracks/{file}/audio` | audio bytes, **Range-aware** (206) |
+| GET | `/playlists/{playlist}/tracks/{file}/audio?format=m4a` | **transcoded** to AAC/m4a (for `.ogg`/`.opus`) |
 | GET | `/playlists/{playlist}/tracks/{file}/lyrics` | `.lrc` text, or 404 |
 | GET | `/playlists/{playlist}/tracks/{file}/artwork` | embedded cover image, or 404 |
+
+### Transcoding (`?format=m4a`)
+
+Apple's `AVPlayer` (iOS) can't decode Ogg Vorbis/Opus. Requesting
+`/audio?format=m4a` transcodes non-native formats to AAC in an `.m4a` container
+using **ffmpeg** (`-c:a aac -b:a 256k -movflags +faststart`). Native formats
+(`.mp3 .m4a .aac .flac .wav .alac .aif/.aiff .caf`) are always served as-is, even
+with `?format=m4a`.
+
+- Requires ffmpeg on the host: `sudo apt install ffmpeg` (Raspberry Pi) /
+  `brew install ffmpeg`. `/health` reports `"ffmpeg": true/false`.
+- Transcodes are cached to disk (`--cache-dir`, default system-temp
+  `aura-transcode`), keyed by source path+size+mtime, and served Range-aware — so
+  seeking works and subsequent plays are instant.
+- Returns `503` if ffmpeg is missing, `502` on transcode failure.
 
 `{playlist}` and `{file}` are URL-encoded path segments; `{file}` is the full
 audio filename (e.g. `16BL%20-%20Sediment.ogg`). Clients should use the

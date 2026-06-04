@@ -28,8 +28,7 @@ struct NowPlayingView: View {
 
     var body: some View {
         let t = app.currentTrack
-        let album = Catalog.album(t.albumId)
-        let pal3 = album.cover.palette
+        let pal3 = t.cover.palette
 
         ZStack {
             // backdrop
@@ -44,7 +43,7 @@ struct NowPlayingView: View {
             VStack(spacing: 0) {
                 topBar(track: t)
                 switch panel {
-                case .main: mainPanel(track: t, album: album)
+                case .main: mainPanel(track: t)
                 case .lyrics: LyricsPanel(track: t, onBack: { panel = .main })
                 case .queue: QueuePanel(onBack: { panel = .main })
                 }
@@ -87,10 +86,10 @@ struct NowPlayingView: View {
         .padding(.top, 8)
     }
 
-    private func mainPanel(track t: Track, album: Album) -> some View {
+    private func mainPanel(track t: Track) -> some View {
         VStack(spacing: 0) {
             Spacer(minLength: 0)
-            Cover(art: album.cover, size: 320, radius: 18)
+            Cover(art: t.cover, url: t.artworkURL, size: 320, radius: 18)
                 .frame(maxWidth: .infinity)
                 .shadow(color: .black.opacity(0.55), radius: 40, y: 30)
                 .scaleEffect(app.player.isPlaying ? 1 : 0.86)
@@ -101,9 +100,11 @@ struct NowPlayingView: View {
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(t.title).font(.system(size: 25, weight: .heavy)).foregroundStyle(.white).lineLimit(1)
-                    Button { app.openArtist(t.artistId); app.nowPlayingOpen = false } label: {
-                        Text(Catalog.artistName(t)).font(.system(size: 16, weight: .medium)).foregroundStyle(.white.opacity(0.72))
-                    }.press()
+                    Button {
+                        if let aid = t.artistId { app.openArtist(aid); app.nowPlayingOpen = false }
+                    } label: {
+                        Text(t.artist).font(.system(size: 16, weight: .medium)).foregroundStyle(.white.opacity(0.72))
+                    }.press().disabled(t.artistId == nil)
                 }
                 Spacer()
                 Button { app.toggleLike(t.id) } label: {
@@ -178,13 +179,12 @@ private struct LyricsPanel: View {
     @Environment(AppModel.self) private var app
 
     var body: some View {
-        let active = Int(app.player.progress * Double(lyrics.count))
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Cover(art: Catalog.album(track.albumId).cover, size: 40, radius: 9)
+                Cover(art: track.cover, url: track.artworkURL, size: 40, radius: 9)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(track.title).font(.system(size: 15, weight: .bold)).foregroundStyle(.white).lineLimit(1)
-                    Text(Catalog.artistName(track)).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
+                    Text(track.artist).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                 }
                 Spacer()
                 Button(action: onBack) { AuraIcon(name: "x", size: 22, color: .white).padding(6) }.press()
@@ -192,25 +192,66 @@ private struct LyricsPanel: View {
             .padding(.horizontal, 24).padding(.top, 10).padding(.bottom, 8)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(lyrics.enumerated()), id: \.offset) { i, line in
-                        let head = line.hasPrefix("[")
-                        Text(head ? line.uppercased() : line)
-                            .font(.system(size: head ? 14 : 23, weight: head ? .bold : .heavy))
-                            .foregroundStyle(head ? .white.opacity(0.4) : (i == active ? .white : .white.opacity(0.34)))
-                            .padding(.vertical, 9)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                            .onTapGesture { app.seek(Double(i) / Double(lyrics.count)) }
-                    }
-                    Text("Lyrics · \(Catalog.artistName(track))")
-                        .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.white.opacity(0.4)).padding(.top, 20)
+                if app.currentLyrics.isEmpty {
+                    cannedLyrics
+                } else {
+                    syncedLyrics
                 }
-                .animation(.easeOut(duration: 0.3), value: active)
-                .padding(.horizontal, 26).padding(.bottom, 60)
             }
             .scrollIndicators(.hidden)
         }
+    }
+
+    // Server-provided, timestamped .lrc lyrics — highlight the active line.
+    private var syncedLyrics: some View {
+        let lines = app.currentLyrics
+        let active = activeIndex(lines, app.currentTime)
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
+                Text(line.text.isEmpty ? "♪" : line.text)
+                    .font(.system(size: 23, weight: .heavy))
+                    .foregroundStyle(i == active ? .white : .white.opacity(0.34))
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if let t = line.time, app.duration > 0 { app.seek(t / app.duration) }
+                    }
+            }
+            Text("Lyrics · \(track.artist)")
+                .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.white.opacity(0.4)).padding(.top, 20)
+        }
+        .animation(.easeOut(duration: 0.3), value: active)
+        .padding(.horizontal, 26).padding(.bottom, 60)
+    }
+
+    private func activeIndex(_ lines: [LyricLine], _ time: Double) -> Int {
+        var idx = -1
+        for (i, l) in lines.enumerated() {
+            if let t = l.time, t <= time + 0.2 { idx = i } else if l.time != nil { break }
+        }
+        return idx
+    }
+
+    // Demo tracks: the original canned lyrics, advanced by progress fraction.
+    private var cannedLyrics: some View {
+        let active = Int(app.player.progress * Double(lyrics.count))
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(lyrics.enumerated()), id: \.offset) { i, line in
+                let head = line.hasPrefix("[")
+                Text(head ? line.uppercased() : line)
+                    .font(.system(size: head ? 14 : 23, weight: head ? .bold : .heavy))
+                    .foregroundStyle(head ? .white.opacity(0.4) : (i == active ? .white : .white.opacity(0.34)))
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { app.seek(Double(i) / Double(lyrics.count)) }
+            }
+            Text("Lyrics · \(track.artist)")
+                .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.white.opacity(0.4)).padding(.top, 20)
+        }
+        .animation(.easeOut(duration: 0.3), value: active)
+        .padding(.horizontal, 26).padding(.bottom, 60)
     }
 }
 
@@ -235,10 +276,10 @@ private struct QueuePanel: View {
                     Text("NOW PLAYING").font(.system(size: 11.5, weight: .bold)).tracking(0.7)
                         .foregroundStyle(.white.opacity(0.5)).padding(.horizontal, 12).padding(.bottom, 6)
                     HStack(spacing: 13) {
-                        Cover(art: Catalog.album(cur.albumId).cover, size: 48, radius: 10)
+                        Cover(art: cur.cover, url: cur.artworkURL, size: 48, radius: 10)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(cur.title).font(.system(size: 15.5, weight: .semibold)).foregroundStyle(app.palette.accent).lineLimit(1)
-                            Text(Catalog.artistName(cur)).font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
+                            Text(cur.artist).font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                         }
                         Spacer()
                         EQBars()
@@ -258,13 +299,13 @@ private struct QueuePanel: View {
                                         handleColor: .white.opacity(0.5),
                                         draggingBackground: .white.opacity(0.08),
                                         onReorder: app.reorderQueue) { id in
-                            let tr = Catalog.track(id)
+                            let tr = app.track(id)
                             let idx = app.queue.firstIndex(of: id) ?? 0
                             HStack(spacing: 13) {
-                                Cover(art: Catalog.album(tr.albumId).cover, size: 48, radius: 10)
+                                Cover(art: tr.cover, url: tr.artworkURL, size: 48, radius: 10)
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(tr.title).font(.system(size: 15.5, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                                    Text(Catalog.artistName(tr)).font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
+                                    Text(tr.artist).font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                                 }
                             }
                             .contentShape(Rectangle())

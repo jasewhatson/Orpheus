@@ -19,6 +19,36 @@ struct SettingsScreen: View {
                 profileCard
                 appearance
 
+                Group(header: "Music server") {
+                    SettingsRow(icon: "devices", iconBg: Color(hex: "5f8ff0"), title: "Host") {
+                        TextField("192.168.20.10", text: $app.settings.serverHost)
+                            .multilineTextAlignment(.trailing).frame(width: 150)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .keyboardType(.numbersAndPunctuation)
+                            .foregroundStyle(pal.text2)
+                    }
+                    sep
+                    SettingsRow(icon: "radio", iconBg: Color(hex: "7be3d4"), title: "Port") {
+                        TextField("8080", value: $app.settings.serverPort, format: .number.grouping(.never))
+                            .multilineTextAlignment(.trailing).frame(width: 80)
+                            .keyboardType(.numberPad)
+                            .foregroundStyle(pal.text2)
+                    }
+                    sep
+                    SettingsRow(icon: "sparkle", iconBg: Color(hex: "9c8cf2"),
+                                title: "Use server library", sub: app.settings.serverEnabled ? "On" : "Off") {
+                        AuraToggle(on: Binding(
+                            get: { app.settings.serverEnabled },
+                            set: { app.applyServerSettings(host: app.settings.serverHost,
+                                                           port: app.settings.serverPort, enabled: $0) }))
+                    }
+                    sep
+                    SettingsRow(icon: "cast", iconBg: Color(hex: "f0a36b"),
+                                title: "Test connection", onTap: { app.testConnection() }) {
+                        Text("Test").font(.system(size: 14, weight: .semibold)).foregroundStyle(pal.accent)
+                    }
+                }
+
                 Group(header: "Playback") {
                     SettingsRow(icon: "volume", iconBg: Color(hex: "5f8ff0"),
                                 title: "Crossfade", sub: app.settings.crossfade == 0 ? "Off" : "\(Int(app.settings.crossfade)) s") {

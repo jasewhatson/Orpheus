@@ -95,7 +95,7 @@ struct TrackRow: View {
                 .frame(width: 22)
             }
             if showCover {
-                Cover(art: Catalog.album(track.albumId).cover, size: dense ? 44 : 50, radius: 9)
+                Cover(art: track.cover, url: track.artworkURL, size: dense ? 44 : 50, radius: 9)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(track.title).font(.system(size: 15.5, weight: .semibold)).lineLimit(1)
@@ -126,6 +126,7 @@ struct TrackRow: View {
 
 struct CardTile: View {
     let art: Artwork
+    var url: URL? = nil
     let title: String
     var subtitle: String? = nil
     var size: CGFloat = 158
@@ -137,7 +138,7 @@ struct CardTile: View {
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: circle ? .center : .leading, spacing: 2) {
-                Cover(art: art, size: size, radius: circle ? size / 2 : radius, shadow: true)
+                Cover(art: art, url: url, size: size, radius: circle ? size / 2 : radius, shadow: true)
                     .padding(.bottom, 8)
                 Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(pal.text)
                     .lineLimit(1).multilineTextAlignment(circle ? .center : .leading)
@@ -183,10 +184,9 @@ struct MiniPlayer: View {
 
     var body: some View {
         let t = app.currentTrack
-        let a = Catalog.album(t.albumId)
         VStack(spacing: 0) {
             HStack(spacing: 11) {
-                Cover(art: a.cover, size: 44, radius: 10)
+                Cover(art: t.cover, url: t.artworkURL, size: 44, radius: 10)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(t.title).font(.system(size: 14.5, weight: .semibold)).lineLimit(1).foregroundStyle(pal.text)
                     Text(Catalog.artistName(t)).font(.system(size: 12.5)).foregroundStyle(pal.text2).lineLimit(1)

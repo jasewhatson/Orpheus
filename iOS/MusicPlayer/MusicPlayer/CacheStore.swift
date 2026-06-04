@@ -9,6 +9,7 @@
 
 import Foundation
 import UIKit
+import CryptoKit
 
 struct TrackMeta: Codable {
     var title: String
@@ -86,7 +87,29 @@ final class CacheStore {
 
     // MARK: Audio
 
-    private func audioKey(_ url: URL) -> String { "audio_" + url.lastPathComponent }
+    // Server audio URLs all end in ".../audio" (and "?format=m4a"), so keying by
+    // lastPathComponent would collide. Key by a hash of the full URL instead.
+    private func audioKey(_ url: URL) -> String { "audio_" + Self.sha1(url.absoluteString) }
+
+    /// Best-effort file extension for a cached audio URL.
+    private func audioExt(_ url: URL) -> String {
+        let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if let fmt = comps?.queryItems?.first(where: { $0.name == "format" })?.value, !fmt.isEmpty {
+            return fmt.lowercased()
+        }
+        // server path: .../tracks/<file>/audio  -> use <file>'s extension
+        let parts = url.path.split(separator: "/").map(String.init)
+        if let i = parts.lastIndex(of: "audio"), i > 0 {
+            let ext = (parts[i - 1] as NSString).pathExtension
+            if !ext.isEmpty { return ext.lowercased() }
+        }
+        let ext = url.pathExtension
+        return ext.isEmpty ? "bin" : ext.lowercased()
+    }
+
+    static func sha1(_ s: String) -> String {
+        Insecure.SHA1.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
 
     /// Local file URL if this remote audio is already cached (touches LRU).
     func localAudio(for url: URL) -> URL? {
@@ -114,12 +137,13 @@ final class CacheStore {
             guard let self else { return }
             defer { self.queue.sync { _ = self.inflight.remove(key) } }
             guard let temp, err == nil else { return }
-            let dest = self.audioDir.appendingPathComponent(url.lastPathComponent)
+            let fname = Self.sha1(url.absoluteString) + "." + self.audioExt(url)
+            let dest = self.audioDir.appendingPathComponent(fname)
             try? FileManager.default.removeItem(at: dest)
             guard (try? FileManager.default.moveItem(at: temp, to: dest)) != nil else { return }
             let size = Self.fileSize(dest)
             self.queue.sync {
-                self.manifest[key] = Entry(file: url.lastPathComponent, size: size, lastAccess: self.now, category: "audio")
+                self.manifest[key] = Entry(file: fname, size: size, lastAccess: self.now, category: "audio")
                 self.enforceBudgetLocked(protecting: key)
                 self.saveManifestLocked()
             }
@@ -157,6 +181,51 @@ final class CacheStore {
             notify()
         }
         return image
+    }
+
+    // MARK: Remote artwork images (downloaded, resized, cached)
+
+    /// Returns a cached/resized image for a remote artwork URL, downloading on a
+    /// miss. Keyed by URL hash; stored as JPEG and counted against the budget.
+    func image(forURL url: URL) async -> UIImage? {
+        let key = "img_" + Self.sha1(url.absoluteString)
+        if let cached: UIImage = queue.sync(execute: {
+            guard var e = manifest[key] else { return nil }
+            let f = artworkDir.appendingPathComponent(e.file)
+            guard let data = try? Data(contentsOf: f), let img = UIImage(data: data) else {
+                manifest[key] = nil; return nil
+            }
+            e.lastAccess = now; manifest[key] = e; saveManifestLocked()
+            return img
+        }) { return cached }
+
+        guard let (data, _) = try? await URLSession.shared.data(from: url),
+              let raw = UIImage(data: data) else { return nil }
+        let img = Self.resized(raw, maxDim: 600)
+        if let jpeg = img.jpegData(compressionQuality: 0.82) {
+            let file = key + ".jpg"
+            let dest = artworkDir.appendingPathComponent(file)
+            try? jpeg.write(to: dest)
+            queue.sync {
+                manifest[key] = Entry(file: file, size: Int64(jpeg.count), lastAccess: now, category: "artwork")
+                enforceBudgetLocked(protecting: key)
+                saveManifestLocked()
+            }
+            notify()
+        }
+        return img
+    }
+
+    private static func resized(_ image: UIImage, maxDim: CGFloat) -> UIImage {
+        let w = image.size.width, h = image.size.height
+        guard max(w, h) > maxDim, max(w, h) > 0 else { return image }
+        let scale = maxDim / max(w, h)
+        let size = CGSize(width: w * scale, height: h * scale)
+        let fmt = UIGraphicsImageRendererFormat.default()
+        fmt.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: fmt).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
     }
 
     // MARK: Metadata

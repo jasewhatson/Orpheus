@@ -9,7 +9,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var app = AppModel()
+    @State private var app = AppModel.shared
 
     var body: some View {
         let pal = app.palette

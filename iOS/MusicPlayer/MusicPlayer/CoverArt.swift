@@ -66,16 +66,44 @@ struct CoverArt: View {
     }
 }
 
-/// Square sugar for the common cover usage.
+/// Square sugar for the common cover usage. When `url` is set, the remote image
+/// is shown (cached) with the generative gradient as placeholder/fallback.
 struct Cover: View {
     let art: Artwork
+    var url: URL? = nil
     var size: CGFloat = 56
     var radius: CGFloat = 12
     var shadow: Bool = false
 
     var body: some View {
-        CoverArt(art: art, cornerRadius: radius)
-            .frame(width: size, height: size)
-            .shadow(color: .black.opacity(shadow ? 0.4 : 0), radius: shadow ? 16 : 0, y: shadow ? 12 : 0)
+        Group {
+            if let url {
+                RemoteImage(url: url, fallback: art, radius: radius)
+            } else {
+                CoverArt(art: art, cornerRadius: radius)
+            }
+        }
+        .frame(width: size, height: size)
+        .shadow(color: .black.opacity(shadow ? 0.4 : 0), radius: shadow ? 16 : 0, y: shadow ? 12 : 0)
+    }
+}
+
+/// Loads (and caches) a remote artwork image, showing the gradient until ready.
+struct RemoteImage: View {
+    let url: URL
+    let fallback: Artwork
+    var radius: CGFloat = 12
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                CoverArt(art: fallback, cornerRadius: radius)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+        .task(id: url) { image = await CacheStore.shared.image(forURL: url) }
     }
 }

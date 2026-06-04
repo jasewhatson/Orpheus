@@ -59,9 +59,24 @@ struct Album: Identifiable, Codable, Hashable {
 struct Track: Identifiable, Codable, Hashable {
     let id: String
     let title: String
-    let artistId: String
-    let albumId: String
-    let dur: Int            // seconds
+    let artist: String          // display name
+    var album: String?
+    var dur: Double             // seconds (0 if unknown)
+    var cover: Artwork          // gradient fallback, always present
+    var artworkURL: URL? = nil  // remote cover image (optional)
+    var audioURL: URL? = nil    // remote source base URL; nil => demo sample mapping
+    var lyricsURL: URL? = nil   // remote .lrc (optional)
+    var fileExt: String? = nil  // source extension, for transcode decision
+    var artistId: String? = nil // demo-only, for artist navigation
+    var albumId: String? = nil  // demo-only
+
+    var isRemote: Bool { audioURL != nil }
+}
+
+/// One parsed lyric line; `time` is nil for headers/untimed lines.
+struct LyricLine: Hashable {
+    var time: Double?
+    var text: String
 }
 
 struct Playlist: Identifiable, Codable, Hashable {
@@ -103,6 +118,30 @@ struct Settings: Codable {
     var cellular: Bool = false
     var offline: Bool = false
     var cacheLimitMB: Int = 250
+
+    // Music server
+    var serverHost: String = "192.168.20.10"
+    var serverPort: Int = 8080
+    var serverEnabled: Bool = false
+
+    init() {}
+
+    // Tolerant decode: any missing key falls back to its default, so adding new
+    // settings never wipes a user's saved preferences.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func v<T: Decodable>(_ k: CodingKeys, _ d: T) -> T { (try? c.decode(T.self, forKey: k)) ?? d }
+        crossfade = v(.crossfade, 6)
+        gapless = v(.gapless, true)
+        normalize = v(.normalize, true)
+        quality = v(.quality, "Lossless")
+        cellular = v(.cellular, false)
+        offline = v(.offline, false)
+        cacheLimitMB = v(.cacheLimitMB, 250)
+        serverHost = v(.serverHost, "192.168.20.10")
+        serverPort = v(.serverPort, 8080)
+        serverEnabled = v(.serverEnabled, false)
+    }
 }
 
 // MARK: - Time formatting

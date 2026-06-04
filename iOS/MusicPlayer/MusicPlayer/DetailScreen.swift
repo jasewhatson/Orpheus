@@ -111,27 +111,32 @@ struct DetailScreen: View {
         let desc = playlist?.desc ?? ""
         let cover = playlist?.cover ?? album!.cover
         let trackIds = playlist?.tracks ?? album!.tracks
-        let tracks = trackIds.compactMap { Catalog.tracks[$0] }
+        let tracks = trackIds.map { app.track($0) }
         let palette = cover.palette
-        let totalSec = tracks.reduce(0) { $0 + $1.dur }
+        let totalSec = tracks.reduce(0.0) { $0 + $1.dur }
         let owner = isPlaylist ? (playlist!.liked ? "AURA" : playlist!.by) : Catalog.artist(album!.artistId).name
         let ctx = PlayContext(kind: kind, id: id)
         let isLikedSongs = isPlaylist && (playlist?.liked ?? false)
+        let remote = isPlaylist && app.isRemotePlaylist(id)
+        let coverURL = remote ? app.serverCoverURL[id] : nil
 
         ZStack(alignment: .top) {
             pal.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 0) {
-                    hero(title: title, desc: desc, cover: cover, palette: palette,
-                         owner: owner, count: tracks.count, minutes: totalSec / 60,
+                    hero(title: title, desc: desc, cover: cover, coverURL: coverURL, palette: palette,
+                         owner: owner, count: tracks.count, minutes: Int(totalSec / 60),
                          isPlaylist: isPlaylist, isLikedSongs: isLikedSongs)
-                    actionRow(ctx: ctx, isPlaylist: isPlaylist, isLikedSongs: isLikedSongs)
+                    actionRow(ctx: ctx, isPlaylist: isPlaylist, isLikedSongs: isLikedSongs, remote: remote)
+                    if remote && tracks.isEmpty {
+                        ProgressView().tint(pal.accent).frame(maxWidth: .infinity).padding(.vertical, 40)
+                    }
                     VStack(spacing: 0) {
                         ForEach(Array(tracks.enumerated()), id: \.offset) { i, t in
                             TrackRowCtx(track: t, index: i + 1, ctx: ctx)
                         }
                     }
-                    if isPlaylist && !isLikedSongs {
+                    if isPlaylist && !isLikedSongs && !remote {
                         Button { app.openManage(id) } label: {
                             HStack(spacing: 11) {
                                 ZStack { AuraIcon(name: "plus", size: 24, color: pal.text2) }
@@ -161,7 +166,7 @@ struct DetailScreen: View {
         }
     }
 
-    private func hero(title: String, desc: String, cover: Artwork, palette: [Color],
+    private func hero(title: String, desc: String, cover: Artwork, coverURL: URL?, palette: [Color],
                       owner: String, count: Int, minutes: Int,
                       isPlaylist: Bool, isLikedSongs: Bool) -> some View {
         ZStack(alignment: .top) {
@@ -183,7 +188,7 @@ struct DetailScreen: View {
                         .background(Palette.likedGradient, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .shadow(color: .black.opacity(0.5), radius: 25, y: 18)
                 } else {
-                    Cover(art: cover, size: 176, radius: 16, shadow: true)
+                    Cover(art: cover, url: coverURL, size: 176, radius: 16, shadow: true)
                 }
                 Text(title).font(.system(size: 26, weight: .heavy)).foregroundStyle(.white)
                     .multilineTextAlignment(.center).padding(.top, 18)
@@ -208,22 +213,26 @@ struct DetailScreen: View {
         }
     }
 
-    private func actionRow(ctx: PlayContext, isPlaylist: Bool, isLikedSongs: Bool) -> some View {
+    private func actionRow(ctx: PlayContext, isPlaylist: Bool, isLikedSongs: Bool, remote: Bool) -> some View {
         HStack {
             HStack(spacing: 18) {
-                Button { app.toggleSave(kind == .album ? "album" : "playlist", id) } label: {
-                    AuraIcon(name: app.isSaved(kind == .album ? "album" : "playlist", id) ? "check-circle" : "plus-circle",
-                             size: 28, color: app.isSaved(kind == .album ? "album" : "playlist", id) ? pal.accent : pal.text2)
-                }.press()
-                Button { app.toast("Downloading…") } label: {
-                    AuraIcon(name: "download", size: 26, color: pal.text2)
-                }.press()
-                if isPlaylist && !isLikedSongs {
+                if !remote {
+                    Button { app.toggleSave(kind == .album ? "album" : "playlist", id) } label: {
+                        AuraIcon(name: app.isSaved(kind == .album ? "album" : "playlist", id) ? "check-circle" : "plus-circle",
+                                 size: 28, color: app.isSaved(kind == .album ? "album" : "playlist", id) ? pal.accent : pal.text2)
+                    }.press()
+                    Button { app.toast("Downloading…") } label: {
+                        AuraIcon(name: "download", size: 26, color: pal.text2)
+                    }.press()
+                }
+                if isPlaylist && !isLikedSongs && !remote {
                     Button { app.openManage(id) } label: { AuraIcon(name: "edit", size: 24, color: pal.text2) }.press()
                 }
-                Button { app.openCollectionMenu(kind == .album ? "album" : "playlist", id) } label: {
-                    AuraIcon(name: "more", size: 26, color: pal.text2)
-                }.press()
+                if !remote {
+                    Button { app.openCollectionMenu(kind == .album ? "album" : "playlist", id) } label: {
+                        AuraIcon(name: "more", size: 26, color: pal.text2)
+                    }.press()
+                }
             }
             Spacer()
             HStack(spacing: 14) {

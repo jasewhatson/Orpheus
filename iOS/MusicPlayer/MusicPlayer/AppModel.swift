@@ -34,6 +34,12 @@ enum Modal: Identifiable {
 @Observable
 final class AppModel {
 
+    /// Single shared instance. `@State var app = AppModel()` in a SwiftUI view
+    /// re-evaluates its initializer whenever the view struct is re-created, which
+    /// would spin up throwaway models (extra AudioEngines, duplicate network
+    /// loads). Using one shared instance guarantees init side effects run once.
+    static let shared = AppModel()
+
     // MARK: Persisted-ish state
     var theme: AppTheme = .dark { didSet { persist("theme", theme) } }
     var playlists: [String: Playlist] = Catalog.defaultPlaylists { didSet { persist("playlists", playlists) } }
@@ -60,9 +66,21 @@ final class AppModel {
     var currentTime: Double = 0
     var duration: Double = 0
 
+    // MARK: Remote library (server-backed; not persisted)
+    /// All known tracks by id (seeded with the demo catalog, merged with server).
+    var library: [String: Track] = Catalog.tracks
+    var serverPlaylists: [String: Playlist] = [:]
+    var serverPlaylistOrder: [String] = []
+    var serverCoverURL: [String: URL] = [:]   // playlist id -> first-track artwork
+    var serverIndexLoaded = false
+    var serverLoading = false
+    /// Parsed lyrics for the current track (empty if none/canned).
+    var currentLyrics: [LyricLine] = []
+
     @ObservationIgnored private let engine = AudioEngine()
     @ObservationIgnored private let cache = CacheStore.shared
     @ObservationIgnored private var metaStored: Set<String> = []
+    @ObservationIgnored private var loadingPlaylists: Set<String> = []
     @ObservationIgnored private var toastTask: Task<Void, Never>?
 
     /// Current on-device cache usage in bytes (observable for Settings).
@@ -91,6 +109,7 @@ final class AppModel {
         refreshCacheUsage()
         wireEngine()
         loadCurrent()   // prime the first track (paused) so lock-screen has info
+        if settings.serverEnabled { Task { await loadServerLibrary() } }
     }
 
     private func wireEngine() {
@@ -138,9 +157,16 @@ final class AppModel {
 
     // MARK: Derived
 
-    var currentTrack: Track { Catalog.track(player.trackId) }
+    var currentTrack: Track { track(player.trackId) }
 
-    func getPlaylist(_ id: String) -> Playlist? { playlists[id] }
+    /// Resolve any track id (demo or server) through the registry.
+    func track(_ id: String) -> Track {
+        library[id] ?? Track(id: id, title: "Unknown", artist: "", album: nil, dur: 0, cover: .placeholder)
+    }
+
+    func getPlaylist(_ id: String) -> Playlist? { playlists[id] ?? serverPlaylists[id] }
+
+    func isRemotePlaylist(_ id: String) -> Bool { id.hasPrefix("srv:") }
 
     func ctxList(_ c: PlayContext) -> [String] {
         if let t = c.tracks { return t }
@@ -184,19 +210,38 @@ final class AppModel {
     /// Loads the current track into the engine (playing iff `isPlaying`) and
     /// refreshes the lock-screen Now Playing info.
     private func loadCurrent() {
+        let t = currentTrack
         player.progress = 0
         currentTime = 0
-        duration = cache.meta(player.trackId)?.duration ?? 0   // prefill from cached metadata
-        engine.load(url: AppModel.url(for: player.trackId), autoplay: player.isPlaying)
+        // prefill duration: cached metadata, else the track's own duration
+        duration = cache.meta(t.id)?.duration ?? t.dur
+        engine.load(url: playbackURL(for: t), autoplay: player.isPlaying)
         updateNowPlaying()
+        loadLyrics(for: t)
+    }
+
+    /// Final streamable URL: remote tracks use their server URL (requesting an
+    /// AAC transcode for non-native formats); demo tracks use the sample mapping.
+    func playbackURL(for t: Track) -> URL {
+        guard let base = t.audioURL else { return AppModel.url(for: t.id) }
+        guard needsTranscode(t.fileExt),
+              var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return base }
+        comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: "format", value: "m4a")]
+        return comps.url ?? base
+    }
+
+    private func needsTranscode(_ ext: String?) -> Bool {
+        guard let e = ext?.lowercased() else { return false }
+        let native: Set<String> = ["mp3", "m4a", "aac", "flac", "wav", "alac", "aif", "aiff", "caf"]
+        return !native.contains(e)
     }
 
     private func cacheMetaIfNeeded(duration: Double) {
         let t = currentTrack
         guard !metaStored.contains(t.id) else { return }
         metaStored.insert(t.id)
-        cache.storeMeta(TrackMeta(title: t.title, artist: Catalog.artistName(t),
-                                  album: Catalog.album(t.albumId).title, duration: duration), id: t.id)
+        cache.storeMeta(TrackMeta(title: t.title, artist: t.artist,
+                                  album: t.album ?? "", duration: duration), id: t.id)
     }
 
     // MARK: Cache controls
@@ -227,9 +272,27 @@ final class AppModel {
 
     private func updateNowPlaying() {
         let t = currentTrack
-        let album = Catalog.album(t.albumId)
-        engine.setTrack(title: t.title, artist: Catalog.artistName(t), album: album.title,
-                        artwork: album.cover, trackId: t.id, isPlaying: player.isPlaying)
+        engine.setTrack(title: t.title, artist: t.artist, album: t.album ?? "",
+                        artwork: t.cover, trackId: t.id, isPlaying: player.isPlaying)
+        // Replace the gradient with real artwork on the lock screen once loaded.
+        if let url = t.artworkURL {
+            Task { @MainActor in
+                if let img = await cache.image(forURL: url), self.player.trackId == t.id {
+                    self.engine.setArtwork(img, trackId: t.id)
+                }
+            }
+        }
+    }
+
+    private func loadLyrics(for t: Track) {
+        currentLyrics = []
+        guard let url = t.lyricsURL else { return }
+        Task { @MainActor in
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  let text = String(data: data, encoding: .utf8),
+                  self.player.trackId == t.id else { return }
+            self.currentLyrics = LRC.parse(text)
+        }
     }
 
     // MARK: Playback
@@ -429,7 +492,12 @@ final class AppModel {
         tab = t
     }
     func openAlbum(_ id: String) { push(.album(id)) }
-    func openPlaylist(_ id: String) { push(.playlist(id)) }
+    func openPlaylist(_ id: String) {
+        if isRemotePlaylist(id), serverPlaylists[id]?.tracks.isEmpty ?? false {
+            Task { await loadServerPlaylist(id) }
+        }
+        push(.playlist(id))
+    }
     func openArtist(_ id: String) { push(.artist(id)) }
     func openManage(_ id: String) { push(.manage(id)) }
 
@@ -446,5 +514,121 @@ final class AppModel {
         let opts = ["Normal", "High", "Lossless", "Hi-Res"]
         let i = opts.firstIndex(of: settings.quality) ?? 0
         settings.quality = opts[(i + 1) % opts.count]
+    }
+
+    // MARK: Server
+
+    var serverBaseURL: URL? {
+        let host = settings.serverHost.trimmingCharacters(in: .whitespaces)
+        guard !host.isEmpty else { return nil }
+        return URL(string: "http://\(host):\(settings.serverPort)")
+    }
+    var api: MusicAPI? { serverBaseURL.map { MusicAPI(baseURL: $0) } }
+
+    var serverPlaylistsList: [Playlist] { serverPlaylistOrder.compactMap { serverPlaylists[$0] } }
+    /// Remote tracks that have been loaded (for Search).
+    var serverTracks: [Track] { library.values.filter { $0.isRemote } }
+
+    func applyServerSettings(host: String, port: Int, enabled: Bool) {
+        settings.serverHost = host
+        settings.serverPort = port
+        settings.serverEnabled = enabled
+        if enabled {
+            Task { await loadServerLibrary() }
+        } else {
+            serverPlaylists = [:]; serverPlaylistOrder = []; serverCoverURL = [:]; serverIndexLoaded = false
+            library = library.filter { !$0.value.isRemote }
+        }
+    }
+
+    func testConnection() {
+        guard let api else { toast("Enter a server host"); return }
+        Task { @MainActor in
+            do {
+                let h = try await api.health()
+                let ff = (h.ffmpeg ?? false) ? "" : " · no ffmpeg!"
+                toast("Connected · \(h.playlistCount) playlists\(ff)")
+                settings.serverEnabled = true
+                await loadServerLibrary()
+            } catch {
+                toast("Couldn't reach server")
+            }
+        }
+    }
+
+    func loadServerLibrary() async {
+        guard let api else { return }
+        serverLoading = true
+        defer { serverLoading = false }
+        do {
+            let pls = try await api.playlists()
+            var order: [String] = []
+            for s in pls {
+                let pid = "srv:" + s.id
+                order.append(pid)
+                if serverPlaylists[pid] == nil {
+                    serverPlaylists[pid] = Playlist(
+                        id: pid, title: s.name, desc: "\(s.trackCount) track" + (s.trackCount == 1 ? "" : "s"),
+                        by: "Server", cover: Self.gradient(for: s.name), tracks: [])
+                }
+            }
+            serverPlaylistOrder = order
+            serverIndexLoaded = true
+            // Background: load each playlist's tracks (covers + search index).
+            Task { for pid in order { await self.loadServerPlaylist(pid) } }
+        } catch {
+            toast("Couldn't load library")
+        }
+    }
+
+    @discardableResult
+    func loadServerPlaylist(_ pid: String) async -> Bool {
+        guard let api, let pl = serverPlaylists[pid], pl.tracks.isEmpty else { return true }
+        guard !loadingPlaylists.contains(pid) else { return true }   // dedupe concurrent fetches
+        loadingPlaylists.insert(pid)
+        defer { loadingPlaylists.remove(pid) }
+        let name = String(pid.dropFirst(4))  // strip "srv:"
+        do {
+            let detail = try await api.playlist(name)
+            var ids: [String] = []
+            for t in detail.tracks {
+                let gid = "srv:" + name + "/" + t.id
+                ids.append(gid)
+                library[gid] = makeRemoteTrack(gid: gid, api: t)
+            }
+            var updated = pl
+            updated.tracks = ids
+            serverPlaylists[pid] = updated
+            if let first = ids.first, let art = library[first]?.artworkURL { serverCoverURL[pid] = art }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func makeRemoteTrack(gid: String, api t: APITrack) -> Track {
+        let ext = (t.file as NSString).pathExtension.lowercased()
+        let resolve: (String?) -> URL? = { rel in rel.flatMap { self.api?.absolute($0) } }
+        return Track(id: gid, title: t.title, artist: t.artist, album: t.album,
+                     dur: t.duration ?? 0,
+                     cover: Self.gradient(for: t.artist + "·" + t.title),
+                     artworkURL: resolve(t.artworkUrl),
+                     audioURL: resolve(t.audioUrl),
+                     lyricsURL: resolve(t.lyricsUrl),
+                     fileExt: ext)
+    }
+
+    /// Deterministic gradient from a seed string (reuses the album palettes).
+    static func gradient(for seed: String) -> Artwork {
+        let palettes: [[String]] = [
+            ["7aa6f2", "3a4d9e", "161a3a"], ["7be3d4", "1d6e72", "08222b"],
+            ["c39bf5", "6a3fb0", "1f1138"], ["f6b67a", "d4673a", "3a1812"],
+            ["8fa6ff", "3b4192", "12153c"], ["6fd6f2", "1f7fae", "082b3e"],
+            ["f59cc6", "b34a86", "3a1230"], ["93ffce", "2c9e74", "0c3324"],
+        ]
+        var h: UInt64 = 5381
+        for b in seed.utf8 { h = (h &* 33) &+ UInt64(b) }
+        let p = palettes[Int(h % UInt64(palettes.count))]
+        return .cover(p[0], p[1], p[2], angle: 160)
     }
 }

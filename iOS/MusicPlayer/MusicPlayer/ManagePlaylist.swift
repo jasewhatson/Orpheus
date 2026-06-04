@@ -86,12 +86,12 @@ struct ManagePlaylistView: View {
                     } else {
                         ReorderableList(ids: order, rowHeight: 62, handleColor: pal.text3,
                                         draggingBackground: pal.surface2, onReorder: { order = $0 }) { tid in
-                            let t = Catalog.track(tid)
+                            let t = app.track(tid)
                             HStack(spacing: 12) {
                                 Button { order.removeAll { $0 == tid } } label: {
                                     AuraIcon(name: "minus-circle", size: 24, color: pal.danger)
                                 }.press()
-                                Cover(art: Catalog.album(t.albumId).cover, size: 46, radius: 9)
+                                Cover(art: t.cover, url: t.artworkURL, size: 46, radius: 9)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(t.title).font(.system(size: 15.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
                                     Text(Catalog.artistName(t)).font(.tSub).foregroundStyle(pal.text2).lineLimit(1)
@@ -133,10 +133,10 @@ struct ManagePlaylistView: View {
                     ForEach(candidates) { t in
                         let has = order.contains(t.id)
                         HStack(spacing: 13) {
-                            Cover(art: Catalog.album(t.albumId).cover, size: 48, radius: 10)
+                            Cover(art: t.cover, url: t.artworkURL, size: 48, radius: 10)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(t.title).font(.system(size: 15.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
-                                Text(Catalog.artistName(t)).font(.tSub).foregroundStyle(pal.text2).lineLimit(1)
+                                Text(t.artist).font(.tSub).foregroundStyle(pal.text2).lineLimit(1)
                             }
                             Spacer()
                             ZStack {

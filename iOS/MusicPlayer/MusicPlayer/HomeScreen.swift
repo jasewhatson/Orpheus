@@ -15,7 +15,7 @@ struct HomeScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 header
-                quickGrid
+                if app.settings.serverEnabled { serverShelf } else { quickGrid }
 
                 madeForYou
                 newReleases
@@ -58,6 +58,41 @@ struct HomeScreen: View {
             .padding(.top, 16)
         }
         .padding(.horizontal, 20)
+    }
+
+    // A 2-up grid of the user's server playlists (Home, when a server is set).
+    private var serverShelf: some View {
+        let pls = app.serverPlaylistsList
+        return Group {
+            if pls.isEmpty {
+                HStack(spacing: 10) {
+                    ProgressView().tint(pal.accent)
+                    Text(app.serverLoading ? "Loading your library…" : "No playlists found")
+                        .font(.tSub).foregroundStyle(pal.text2)
+                    Spacer()
+                }
+                .padding(.horizontal, 20).padding(.top, 16)
+            } else {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 9), GridItem(.flexible(), spacing: 9)], spacing: 9) {
+                    ForEach(pls) { p in
+                        Button { app.openPlaylist(p.id) } label: {
+                            HStack(spacing: 10) {
+                                Cover(art: p.cover, url: app.serverCoverURL[p.id], size: 60, radius: 0)
+                                Text(p.title).font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundStyle(pal.text).lineLimit(2).multilineTextAlignment(.leading)
+                                Spacer(minLength: 0)
+                            }
+                            .frame(height: 60)
+                            .padding(.trailing, 8)
+                            .background(pal.surface2)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(pal.line, lineWidth: 0.5))
+                        }.press()
+                    }
+                }
+                .padding(.horizontal, 20).padding(.top, 16)
+            }
+        }
     }
 
     private var quickGrid: some View {

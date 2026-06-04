@@ -25,13 +25,18 @@ still runs and derives artist/title from filenames.
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 # Optional: embedded tag / artwork reading.
 try:
@@ -55,8 +60,73 @@ AUDIO_MIME = {
     ".wav": "audio/wav",
 }
 
+# Extensions Apple's AVPlayer can decode natively — served as-is, never
+# transcoded. Everything else (e.g. .ogg/.opus) is transcoded to AAC/m4a.
+NATIVE_EXTS = set([".mp3", ".m4a", ".aac", ".flac", ".wav", ".alac",
+                   ".aif", ".aiff", ".caf"])
+
 # Set in main().
 ROOT = ""
+TRANSCODE_DIR = ""
+HAVE_FFMPEG = shutil.which("ffmpeg") is not None
+
+# Per-source-key locks so concurrent requests don't transcode the same file twice.
+_transcode_locks = {}
+_transcode_guard = threading.Lock()
+
+
+def _key_lock(key):
+    with _transcode_guard:
+        lk = _transcode_locks.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _transcode_locks[key] = lk
+        return lk
+
+
+def ensure_transcoded(src):
+    """Transcode `src` to a cached AAC/m4a file. Returns its path, or None if
+    ffmpeg is unavailable or the transcode fails. Cached by source
+    path+size+mtime so edits invalidate; reused on subsequent requests."""
+    if not HAVE_FFMPEG:
+        return None
+    try:
+        st = os.stat(src)
+    except OSError:
+        return None
+    raw = "{}|{}|{}".format(os.path.realpath(src), st.st_size, int(st.st_mtime))
+    key = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    dest = os.path.join(TRANSCODE_DIR, key + ".m4a")
+    if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+        return dest
+    with _key_lock(key):
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            return dest
+        tmp = dest + ".tmp"
+        # -f ipod forces the m4a/AAC muxer; without it ffmpeg would try to infer
+        # the container from the ".tmp" extension and fail.
+        cmd = ["ffmpeg", "-nostdin", "-y", "-i", src, "-vn",
+               "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart",
+               "-f", "ipod", tmp]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE)
+            proc.communicate()
+            if proc.returncode != 0 or not os.path.isfile(tmp):
+                _quiet_remove(tmp)
+                return None
+            os.replace(tmp, dest)
+            return dest
+        except Exception:
+            _quiet_remove(tmp)
+            return None
+
+
+def _quiet_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -326,8 +396,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route(self):
         try:
-            path = urlparse(self.path).path
-            parts = [unquote(p) for p in path.split("/") if p != ""]
+            parsed = urlparse(self.path)
+            parts = [unquote(p) for p in parsed.path.split("/") if p != ""]
+            query = parse_qs(parsed.query)
 
             if not parts or parts == ["health"]:
                 return self._health()
@@ -340,7 +411,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[0] == "playlists" and parts[2] == "tracks":
                 pl, fname, sub = parts[1], parts[3], parts[4]
                 if sub == "audio":
-                    return self._track_audio(pl, fname)
+                    fmt = (query.get("format") or [None])[0]
+                    return self._track_audio(pl, fname, fmt)
                 if sub == "lyrics":
                     return self._track_lyrics(pl, fname)
                 if sub == "artwork":
@@ -371,6 +443,7 @@ class Handler(BaseHTTPRequestHandler):
             "root": ROOT,
             "playlistCount": count,
             "mutagen": HAVE_MUTAGEN,
+            "ffmpeg": HAVE_FFMPEG,
         })
 
     def _list_playlists(self):
@@ -410,11 +483,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "track not found")
         self._json(track_json(pl, fname, f))
 
-    def _track_audio(self, pl: str, fname: str):
+    def _track_audio(self, pl: str, fname: str, fmt=None):
         f = self._resolve_track(pl, fname)
         if f is None:
             return self._error(404, "track not found")
-        mime = AUDIO_MIME.get(os.path.splitext(fname)[1].lower(), "application/octet-stream")
+        ext = os.path.splitext(fname)[1].lower()
+        # Transcode non-native formats (e.g. .ogg) to AAC/m4a on request so
+        # AVPlayer can play them; native formats are always served as-is.
+        if fmt in ("m4a", "aac") and ext not in NATIVE_EXTS:
+            if not HAVE_FFMPEG:
+                return self._error(503, "transcoding unavailable (ffmpeg not installed)")
+            dest = ensure_transcoded(f)
+            if dest is None:
+                return self._error(502, "transcode failed")
+            return self._serve_range(dest, "audio/mp4")
+        mime = AUDIO_MIME.get(ext, "application/octet-stream")
         self._serve_range(f, mime)
 
     def _track_lyrics(self, pl: str, fname: str):
@@ -526,20 +609,28 @@ def main(argv=None):
                              "or set MUSIC_ROOT")
     parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
+    parser.add_argument("--cache-dir", default=os.environ.get("TRANSCODE_DIR"),
+                        help="where transcoded audio is cached "
+                             "(default: system temp /aura-transcode)")
     args = parser.parse_args(argv)
 
     if not args.root:
         parser.error("music root required: pass it as an argument or set MUSIC_ROOT")
 
-    global ROOT
+    global ROOT, TRANSCODE_DIR
     ROOT = os.path.realpath(os.path.expanduser(args.root))
     if not os.path.isdir(ROOT):
         parser.error("not a directory: {}".format(ROOT))
+
+    TRANSCODE_DIR = args.cache_dir or os.path.join(tempfile.gettempdir(), "aura-transcode")
+    os.makedirs(TRANSCODE_DIR, exist_ok=True)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print("AURA music server v" + VERSION)
     print("  root:     " + ROOT)
     print("  mutagen:  " + ("yes" if HAVE_MUTAGEN else "no (filename metadata only)"))
+    print("  ffmpeg:   " + ("yes" if HAVE_FFMPEG else "no (.ogg/.opus won't transcode)"))
+    print("  cache:    " + TRANSCODE_DIR)
     print("  serving:  http://{}:{}".format(args.host, args.port))
     print("  endpoints: /health  /playlists  /playlists/{name}  "
           ".../tracks/{file}[/audio|/lyrics|/artwork]")

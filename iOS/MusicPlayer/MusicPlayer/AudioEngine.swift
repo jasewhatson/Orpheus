@@ -126,6 +126,13 @@ final class AudioEngine {
         center.playbackState = isPlaying ? .playing : .paused
     }
 
+    /// Replace the lock-screen artwork (e.g. once a remote image has loaded).
+    func setArtwork(_ image: UIImage, trackId: String) {
+        nowPlaying[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        artworkTrackId = trackId
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlaying
+    }
+
     func setRate(_ playing: Bool) {
         nowPlaying[MPNowPlayingInfoPropertyPlaybackRate] = playing ? 1.0 : 0.0
         let center = MPNowPlayingInfoCenter.default()

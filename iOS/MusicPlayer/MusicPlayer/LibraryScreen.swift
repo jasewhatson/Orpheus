@@ -14,6 +14,7 @@ private struct LibItem: Identifiable {
     let liked: Bool
     let subtitle: String
     let downloaded: Bool
+    var url: URL? = nil
 }
 
 struct LibraryScreen: View {
@@ -27,20 +28,33 @@ struct LibraryScreen: View {
 
     private var items: [LibItem] {
         var out: [LibItem] = []
-        for p in orderedPlaylists() {
-            out.append(LibItem(id: p.id, kind: .playlist, title: p.title, art: p.cover, liked: p.liked,
-                               subtitle: p.liked ? "Playlist · \(p.tracks.count) songs" : "Playlist · \(p.by)",
-                               downloaded: p.id == "deep-focus"))
-        }
-        for id in ["aurora", "submerged", "goldenhour"] {
-            let a = Catalog.album(id)
-            out.append(LibItem(id: id, kind: .album, title: a.title, art: a.cover, liked: false,
-                               subtitle: "Album · \(Catalog.artist(a.artistId).name)", downloaded: false))
-        }
-        for id in ["lumora", "astral"] {
-            let ar = Catalog.artist(id)
-            out.append(LibItem(id: id, kind: .artist, title: ar.name, art: ar.artwork, liked: false,
-                               subtitle: "Artist", downloaded: false))
+        if app.settings.serverEnabled {
+            // Real library from the server, plus the local Liked Songs.
+            for p in app.serverPlaylistsList {
+                out.append(LibItem(id: p.id, kind: .playlist, title: p.title, art: p.cover, liked: false,
+                                   subtitle: p.desc.isEmpty ? "Playlist" : "Playlist · \(p.desc)",
+                                   downloaded: false, url: app.serverCoverURL[p.id]))
+            }
+            if let fav = app.playlists["favorites"] {
+                out.append(LibItem(id: fav.id, kind: .playlist, title: fav.title, art: fav.cover, liked: true,
+                                   subtitle: "Playlist · \(fav.tracks.count) songs", downloaded: false))
+            }
+        } else {
+            for p in orderedPlaylists() {
+                out.append(LibItem(id: p.id, kind: .playlist, title: p.title, art: p.cover, liked: p.liked,
+                                   subtitle: p.liked ? "Playlist · \(p.tracks.count) songs" : "Playlist · \(p.by)",
+                                   downloaded: p.id == "deep-focus"))
+            }
+            for id in ["aurora", "submerged", "goldenhour"] {
+                let a = Catalog.album(id)
+                out.append(LibItem(id: id, kind: .album, title: a.title, art: a.cover, liked: false,
+                                   subtitle: "Album · \(Catalog.artist(a.artistId).name)", downloaded: false))
+            }
+            for id in ["lumora", "astral"] {
+                let ar = Catalog.artist(id)
+                out.append(LibItem(id: id, kind: .artist, title: ar.name, art: ar.artwork, liked: false,
+                                   subtitle: "Artist", downloaded: false))
+            }
         }
         switch filter {
         case "Playlists": out = out.filter { $0.kind == .playlist }
@@ -115,7 +129,7 @@ struct LibraryScreen: View {
     private var gridBody: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 16) {
             ForEach(items) { i in
-                CardTile(art: i.art, title: i.title, subtitle: i.subtitle, size: 158,
+                CardTile(art: i.art, url: i.url, title: i.title, subtitle: i.subtitle, size: 158,
                          radius: i.liked ? 14 : 12, circle: i.kind == .artist) { open(i) }
             }
         }
@@ -148,7 +162,7 @@ struct LibraryScreen: View {
                     .frame(width: 56, height: 56)
                     .background(Palette.likedGradient, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
-                Cover(art: i.art, size: 56, radius: i.kind == .artist ? 28 : 11)
+                Cover(art: i.art, url: i.url, size: 56, radius: i.kind == .artist ? 28 : 11)
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(i.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
