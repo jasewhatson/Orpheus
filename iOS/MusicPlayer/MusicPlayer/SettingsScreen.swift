@@ -54,6 +54,24 @@ struct SettingsScreen: View {
                     }
                 }
 
+                Group(header: "Storage") {
+                    SettingsRow(icon: "downloaded", iconBg: Color(hex: "67d2f0"),
+                                title: "Cache size",
+                                sub: "\(fmtBytes(app.cacheBytes)) used",
+                                onTap: { app.cycleCacheLimit() }) {
+                        HStack(spacing: 4) {
+                            Text(limitLabel(app.settings.cacheLimitMB)).font(.system(size: 14)).foregroundStyle(pal.text2)
+                            AuraIcon(name: "chev", size: 16, color: pal.text4)
+                        }
+                    }
+                    sep
+                    SettingsRow(icon: "trash", iconBg: pal.danger,
+                                title: "Clear cache", sub: "Audio, artwork & metadata",
+                                onTap: { app.clearCache() }) {
+                        Text("Clear").font(.system(size: 14, weight: .semibold)).foregroundStyle(pal.danger)
+                    }
+                }
+
                 Group(header: "Account") {
                     SettingsRow(icon: "user", iconBg: Color(hex: "f08fc0"), title: "Account", sub: "alex@aura.fm") { chevron }
                     sep
@@ -76,6 +94,14 @@ struct SettingsScreen: View {
             .padding(.bottom, 200)
         }
         .scrollIndicators(.hidden)
+        .onAppear { app.refreshCacheUsage() }
+    }
+
+    private func fmtBytes(_ b: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: b, countStyle: .file)
+    }
+    private func limitLabel(_ mb: Int) -> String {
+        mb >= 1024 ? "\(mb / 1024) GB" : "\(mb) MB"
     }
 
     private var chevron: some View { AuraIcon(name: "chev", size: 17, color: pal.text4) }

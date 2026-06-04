@@ -112,7 +112,9 @@ struct NowPlayingView: View {
                 }.press()
             }
 
-            Scrubber(value: app.player.progress, duration: t.dur, onSeek: app.seek, big: true)
+            Scrubber(value: app.player.progress,
+                     duration: Int(app.duration > 0 ? app.duration : Double(t.dur)),
+                     onSeek: app.seek, big: true)
                 .padding(.top, 8)
 
             HStack {

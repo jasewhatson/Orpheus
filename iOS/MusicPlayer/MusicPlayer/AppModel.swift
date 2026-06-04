@@ -56,10 +56,26 @@ final class AppModel {
     var queue: [String]
     var history: [String] = []
 
-    @ObservationIgnored private var ticker: Timer?
+    /// Real playback time + asset duration (seconds) from the audio engine.
+    var currentTime: Double = 0
+    var duration: Double = 0
+
+    @ObservationIgnored private let engine = AudioEngine()
+    @ObservationIgnored private let cache = CacheStore.shared
+    @ObservationIgnored private var metaStored: Set<String> = []
     @ObservationIgnored private var toastTask: Task<Void, Never>?
 
+    /// Current on-device cache usage in bytes (observable for Settings).
+    var cacheBytes: Int64 = 0
+    static let cacheOptionsMB = [50, 100, 250, 500, 1024]
+
     var palette: Palette { Palette(theme: theme) }
+
+    /// Maps each track deterministically to one of the 6 sample MP3s.
+    static func url(for trackId: String) -> URL {
+        let n = trackId.unicodeScalars.reduce(0) { $0 + Int($1.value) } % 6
+        return URL(string: "https://audio-samples.github.io/samples/mp3/music_primed/sample-\(n).mp3")!
+    }
 
     // MARK: Init
 
@@ -70,6 +86,33 @@ final class AppModel {
         let i = album.tracks.firstIndex(of: "aurora-t") ?? 0
         queue = Array(album.tracks[(i + 1)...])
         loadPersisted()
+        cache.setMaxBytes(Int64(settings.cacheLimitMB) * 1024 * 1024)
+        cache.onChange = { [weak self] in self?.refreshCacheUsage() }
+        refreshCacheUsage()
+        wireEngine()
+        loadCurrent()   // prime the first track (paused) so lock-screen has info
+    }
+
+    private func wireEngine() {
+        engine.onTime = { [weak self] cur, dur in
+            guard let self else { return }
+            self.currentTime = cur
+            if dur > 0 {
+                self.duration = dur
+                self.player.progress = min(1, cur / dur)
+                self.cacheMetaIfNeeded(duration: dur)
+            }
+        }
+        engine.onEnd = { [weak self] in self?.advance(auto: true) }
+        engine.onPlay = { [weak self] in self?.setPlaying(true) }
+        engine.onPause = { [weak self] in self?.setPlaying(false) }
+        engine.onToggle = { [weak self] in self?.togglePlay() }
+        engine.onNext = { [weak self] in self?.next() }
+        engine.onPrev = { [weak self] in self?.prev() }
+        engine.onSeek = { [weak self] sec in
+            guard let self else { return }
+            self.seek(self.duration > 0 ? sec / self.duration : 0)
+        }
     }
 
     // MARK: Persistence
@@ -136,24 +179,58 @@ final class AppModel {
         }
     }
 
-    // MARK: Ticker
+    // MARK: Engine bridge
 
-    private func startTicker() {
-        ticker?.invalidate()
-        ticker = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self, self.player.isPlaying else { return }
-            let dur = Double(self.currentTrack.dur)
-            let np = self.player.progress + 1 / dur / 4
-            if np >= 1 {
-                self.advance(auto: true)
-            } else {
-                self.player.progress = np
-            }
-        }
+    /// Loads the current track into the engine (playing iff `isPlaying`) and
+    /// refreshes the lock-screen Now Playing info.
+    private func loadCurrent() {
+        player.progress = 0
+        currentTime = 0
+        duration = cache.meta(player.trackId)?.duration ?? 0   // prefill from cached metadata
+        engine.load(url: AppModel.url(for: player.trackId), autoplay: player.isPlaying)
+        updateNowPlaying()
     }
-    private func stopTicker() { ticker?.invalidate(); ticker = nil }
 
-    private func syncTicker() { player.isPlaying ? startTicker() : stopTicker() }
+    private func cacheMetaIfNeeded(duration: Double) {
+        let t = currentTrack
+        guard !metaStored.contains(t.id) else { return }
+        metaStored.insert(t.id)
+        cache.storeMeta(TrackMeta(title: t.title, artist: Catalog.artistName(t),
+                                  album: Catalog.album(t.albumId).title, duration: duration), id: t.id)
+    }
+
+    // MARK: Cache controls
+
+    func refreshCacheUsage() { cacheBytes = cache.totalBytes() }
+
+    func cycleCacheLimit() {
+        let opts = AppModel.cacheOptionsMB
+        let i = opts.firstIndex(of: settings.cacheLimitMB) ?? 2
+        settings.cacheLimitMB = opts[(i + 1) % opts.count]
+        cache.setMaxBytes(Int64(settings.cacheLimitMB) * 1024 * 1024)
+        refreshCacheUsage()
+    }
+
+    func clearCache() {
+        cache.clearAll()
+        metaStored.removeAll()
+        refreshCacheUsage()
+        toast("Cache cleared")
+    }
+
+    /// Sets the play/pause state without toggling, driving the engine.
+    private func setPlaying(_ playing: Bool) {
+        player.isPlaying = playing
+        playing ? engine.play() : engine.pause()
+        engine.setRate(playing)
+    }
+
+    private func updateNowPlaying() {
+        let t = currentTrack
+        let album = Catalog.album(t.albumId)
+        engine.setTrack(title: t.title, artist: Catalog.artistName(t), album: album.title,
+                        artwork: album.cover, trackId: t.id, isPlaying: player.isPlaying)
+    }
 
     // MARK: Playback
 
@@ -172,8 +249,7 @@ final class AppModel {
         startQueue(ctxList(c), startId: id, shuffle: player.shuffle)
         player.trackId = id
         player.isPlaying = true
-        player.progress = 0
-        syncTicker()
+        loadCurrent()
     }
 
     func playContext(_ c: PlayContext) {
@@ -187,42 +263,46 @@ final class AppModel {
         history = []
         player.trackId = first
         player.isPlaying = true
-        player.progress = 0
-        syncTicker()
+        loadCurrent()
     }
 
-    func togglePlay() { player.isPlaying.toggle(); syncTicker() }
+    func togglePlay() { setPlaying(!player.isPlaying) }
 
-    func seek(_ f: Double) { player.progress = max(0, min(0.999, f)) }
+    func seek(_ f: Double) {
+        let v = max(0, min(0.999, f))
+        player.progress = v
+        currentTime = duration * v
+        engine.seek(toFraction: v)
+    }
 
     func advance(auto: Bool) {
         if auto && player.repeatMode == .one {
-            player.progress = 0
+            seek(0)
+            if player.isPlaying { engine.play() }
             return
         }
         if queue.isEmpty {
             if player.repeatMode == .all {
                 let list = ctxList(ctx)
-                guard let first = list.first else { player.isPlaying = false; return }
+                guard let first = list.first else { setPlaying(false); return }
                 history.append(player.trackId)
                 player.trackId = first
-                player.progress = 0
                 player.isPlaying = true
                 queue = Array(list.dropFirst())
-                syncTicker()
+                loadCurrent()
                 return
             }
             player.isPlaying = false
             player.progress = 1
-            syncTicker()
+            engine.pause()
+            updateNowPlaying()
             return
         }
         let nextId = queue.removeFirst()
         history.append(player.trackId)
         player.trackId = nextId
-        player.progress = 0
         player.isPlaying = true
-        syncTicker()
+        loadCurrent()
     }
 
     func next() { advance(auto: false) }
@@ -233,9 +313,8 @@ final class AppModel {
         history.removeLast()
         queue.insert(player.trackId, at: 0)
         player.trackId = prevId
-        player.progress = 0
         player.isPlaying = true
-        syncTicker()
+        loadCurrent()
     }
 
     func toggleShuffle() {
@@ -270,9 +349,8 @@ final class AppModel {
         history.append(contentsOf: [player.trackId] + Array(queue[..<index]))
         queue = Array(queue[(index + 1)...])
         player.trackId = id
-        player.progress = 0
         player.isPlaying = true
-        syncTicker()
+        loadCurrent()
     }
 
     // MARK: Likes / downloads / saves / follow

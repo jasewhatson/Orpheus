@@ -102,6 +102,7 @@ struct Settings: Codable {
     var quality: String = "Lossless"
     var cellular: Bool = false
     var offline: Bool = false
+    var cacheLimitMB: Int = 250
 }
 
 // MARK: - Time formatting
