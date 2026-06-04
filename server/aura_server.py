@@ -23,15 +23,14 @@ the optional `mutagen` package (`pip install mutagen`); without it the server
 still runs and derives artist/title from filenames.
 """
 
-from __future__ import annotations
-
 import argparse
 import base64
 import json
 import os
 import re
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from urllib.parse import quote, unquote, urlparse
 
 # Optional: embedded tag / artwork reading.
@@ -58,6 +57,13 @@ AUDIO_MIME = {
 
 # Set in main().
 ROOT = ""
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Threaded server. (http.server.ThreadingHTTPServer needs Python 3.7+;
+    this works back to 3.4.)"""
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 # --------------------------------------------------------------------------- #
@@ -262,7 +268,7 @@ def track_json(playlist: str, fname: str, audio_path: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"AURA/{VERSION}"
+    server_version = "AURA/" + VERSION
 
     # ---- low-level helpers ----
 
@@ -345,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
         except Exception as exc:  # pragma: no cover
             try:
-                self._error(500, f"server error: {exc}")
+                self._error(500, "server error: {}".format(exc))
             except Exception:
                 pass
 
@@ -474,7 +480,7 @@ class Handler(BaseHTTPRequestHandler):
                 end = min(end, size - 1)
                 if start > end or start >= size:
                     self.send_response(416)
-                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Range", "bytes */{}".format(size))
                     self.end_headers()
                     return
 
@@ -484,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
         if partial:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Range", "bytes {}-{}/{}".format(start, end, size))
         self.end_headers()
 
         if self.command == "HEAD":
@@ -528,13 +534,13 @@ def main(argv=None):
     global ROOT
     ROOT = os.path.realpath(os.path.expanduser(args.root))
     if not os.path.isdir(ROOT):
-        parser.error(f"not a directory: {ROOT}")
+        parser.error("not a directory: {}".format(ROOT))
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"AURA music server v{VERSION}")
-    print(f"  root:     {ROOT}")
-    print(f"  mutagen:  {'yes' if HAVE_MUTAGEN else 'no (filename metadata only)'}")
-    print(f"  serving:  http://{args.host}:{args.port}")
+    print("AURA music server v" + VERSION)
+    print("  root:     " + ROOT)
+    print("  mutagen:  " + ("yes" if HAVE_MUTAGEN else "no (filename metadata only)"))
+    print("  serving:  http://{}:{}".format(args.host, args.port))
     print("  endpoints: /health  /playlists  /playlists/{name}  "
           ".../tracks/{file}[/audio|/lyrics|/artwork]")
     try:

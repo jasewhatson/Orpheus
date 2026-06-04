@@ -40,7 +40,8 @@ MUSIC_ROOT=/path/to/MUSIC_ROOT python3 aura_server.py
 python3 aura_server.py /path/to/MUSIC_ROOT --host 127.0.0.1 --port 9000
 ```
 
-Requires Python 3.8+.
+Requires Python **3.4+** (uses only the standard library; tested on 3.4 through
+3.13 — handy for older Raspberry Pi installs).
 
 ### Optional: embedded tags + artwork
 
@@ -52,6 +53,11 @@ With `mutagen` available the server reads title/artist/album/duration and cover
 art embedded in the files. Without it, the server still runs and parses
 `Artist - Title - Mix.ext` filenames; `duration` and `artworkUrl` come back
 `null`.
+
+> Note: current `mutagen` releases require Python 3.8+. On an old interpreter
+> (e.g. Python 3.4) the import simply fails and the server runs in
+> filename-only mode — or `pip install "mutagen<1.46"` for an older compatible
+> build.
 
 ## API
 

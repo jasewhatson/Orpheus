@@ -14,3 +14,7 @@ Secrets.plist
 # Signing
 *.p12
 *.mobileprovision
+
+# Python
+__pycache__/
+*.pyc
