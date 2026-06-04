@@ -238,6 +238,11 @@ final class AppModel {
 
     private func cacheMetaIfNeeded(duration: Double) {
         let t = currentTrack
+        // Backfill a missing list duration from the real asset length.
+        if var lib = library[t.id], lib.dur <= 0, duration > 0 {
+            lib.dur = duration
+            library[t.id] = lib
+        }
         guard !metaStored.contains(t.id) else { return }
         metaStored.insert(t.id)
         cache.storeMeta(TrackMeta(title: t.title, artist: t.artist,

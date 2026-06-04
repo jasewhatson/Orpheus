@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -69,6 +70,11 @@ NATIVE_EXTS = set([".mp3", ".m4a", ".aac", ".flac", ".wav", ".alac",
 ROOT = ""
 TRANSCODE_DIR = ""
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None
+HAVE_FFPROBE = shutil.which("ffprobe") is not None
+
+# In-memory probe cache: realpath -> (mtime, size, meta-dict)
+_probe_cache = {}
+_probe_guard = threading.Lock()
 
 # Per-source-key locks so concurrent requests don't transcode the same file twice.
 _transcode_locks = {}
@@ -175,9 +181,10 @@ def parse_filename(stem: str):
 
 
 def read_tags(path: str):
-    """Embedded tags via mutagen, or None. Lightweight artwork *presence* check."""
+    """Embedded tags. Prefers mutagen; falls back to ffprobe (handy on systems
+    where mutagen can't be installed, e.g. old Python on a Raspberry Pi)."""
     if not HAVE_MUTAGEN:
-        return None
+        return read_tags_ffprobe(path)
     try:
         audio = MutagenFile(path)
     except Exception:
@@ -223,6 +230,59 @@ def read_tags(path: str):
     }
 
 
+def read_tags_ffprobe(path: str):
+    """Tags + duration + artwork presence via ffprobe. Cached per file."""
+    if not HAVE_FFPROBE:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    rp = os.path.realpath(path)
+    with _probe_guard:
+        hit = _probe_cache.get(rp)
+        if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
+            return hit[2]
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", "-show_streams", path],
+            stderr=subprocess.DEVNULL)
+        data = json.loads(out.decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+    fmt = data.get("format", {}) or {}
+    tags = {}
+    for k, v in (fmt.get("tags") or {}).items():
+        tags[k.lower()] = v
+    has_art = False
+    for stream in data.get("streams", []):
+        for k, v in (stream.get("tags") or {}).items():
+            tags.setdefault(k.lower(), v)
+        if stream.get("codec_type") == "video" and \
+           (stream.get("disposition", {}) or {}).get("attached_pic") == 1:
+            has_art = True
+
+    duration = None
+    try:
+        if fmt.get("duration"):
+            duration = round(float(fmt["duration"]), 2)
+    except (TypeError, ValueError):
+        pass
+
+    meta = {
+        "title": tags.get("title") or None,
+        "artist": tags.get("artist") or tags.get("album_artist") or None,
+        "album": tags.get("album") or None,
+        "duration": duration,
+        "has_art": has_art,
+    }
+    with _probe_guard:
+        _probe_cache[rp] = (st.st_mtime, st.st_size, meta)
+    return meta
+
+
 def has_artwork(audio) -> bool:
     """Cheap presence check — does not decode the image."""
     try:
@@ -243,16 +303,52 @@ def has_artwork(audio) -> bool:
     return False
 
 
+def extract_artwork_ffmpeg(path: str):
+    """Extract the embedded cover via ffmpeg (cached), or None."""
+    if not HAVE_FFMPEG:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = hashlib.sha1(
+        ("{}|{}|{}".format(os.path.realpath(path), st.st_size, int(st.st_mtime))).encode("utf-8")
+    ).hexdigest()
+    dest = os.path.join(TRANSCODE_DIR, "art_" + key + ".jpg")
+    if not (os.path.isfile(dest) and os.path.getsize(dest) > 0):
+        with _key_lock("art_" + key):
+            if not (os.path.isfile(dest) and os.path.getsize(dest) > 0):
+                tmp = dest + ".tmp"
+                cmd = ["ffmpeg", "-nostdin", "-y", "-i", path, "-an",
+                       "-map", "0:v:0", "-c:v", "mjpeg", "-frames:v", "1",
+                       "-f", "image2", tmp]
+                try:
+                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    proc.communicate()
+                    if proc.returncode != 0 or not os.path.isfile(tmp):
+                        _quiet_remove(tmp)
+                        return None
+                    os.replace(tmp, dest)
+                except Exception:
+                    _quiet_remove(tmp)
+                    return None
+    try:
+        with open(dest, "rb") as fh:
+            return fh.read(), "image/jpeg"
+    except OSError:
+        return None
+
+
 def extract_artwork(path: str):
     """Return (image_bytes, mime) for the first embedded cover, or None."""
     if not HAVE_MUTAGEN:
-        return None
+        return extract_artwork_ffmpeg(path)
     try:
         audio = MutagenFile(path)
     except Exception:
         return None
     if audio is None:
-        return None
+        return extract_artwork_ffmpeg(path)
 
     # FLAC native pictures
     pics = getattr(audio, "pictures", None)
@@ -297,7 +393,7 @@ def extract_artwork(path: str):
     except Exception:
         pass
 
-    return None
+    return extract_artwork_ffmpeg(path)
 
 
 def track_json(playlist: str, fname: str, audio_path: str) -> dict:
@@ -444,6 +540,7 @@ class Handler(BaseHTTPRequestHandler):
             "playlistCount": count,
             "mutagen": HAVE_MUTAGEN,
             "ffmpeg": HAVE_FFMPEG,
+            "ffprobe": HAVE_FFPROBE,
         })
 
     def _list_playlists(self):
@@ -474,7 +571,13 @@ class Handler(BaseHTTPRequestHandler):
             )
         except OSError:
             return self._error(500, "cannot read playlist")
-        tracks = [track_json(pl, f, os.path.join(d, f)) for f in files]
+        # Metadata probing (ffprobe) is per-file and slowish; run in parallel.
+        if files:
+            workers = min(8, len(files))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                tracks = list(ex.map(lambda f: track_json(pl, f, os.path.join(d, f)), files))
+        else:
+            tracks = []
         self._json({"id": pl, "name": pl, "tracks": tracks})
 
     def _track_detail(self, pl: str, fname: str):
@@ -628,7 +731,8 @@ def main(argv=None):
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print("AURA music server v" + VERSION)
     print("  root:     " + ROOT)
-    print("  mutagen:  " + ("yes" if HAVE_MUTAGEN else "no (filename metadata only)"))
+    meta_src = "mutagen" if HAVE_MUTAGEN else ("ffprobe" if HAVE_FFPROBE else "filenames only")
+    print("  metadata: " + meta_src + " (tags/duration/artwork)")
     print("  ffmpeg:   " + ("yes" if HAVE_FFMPEG else "no (.ogg/.opus won't transcode)"))
     print("  cache:    " + TRANSCODE_DIR)
     print("  serving:  http://{}:{}".format(args.host, args.port))
