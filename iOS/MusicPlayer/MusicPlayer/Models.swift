@@ -123,7 +123,8 @@ struct Settings: Codable {
     var serverHost: String = "192.168.20.10"
     var serverPort: Int = 8080
     var serverEnabled: Bool = false
-    var transcodeKbps: Int = 256   // AAC bitrate requested for transcoded (.ogg) audio
+    var transcodeKbps: Int = 256       // bitrate requested for transcoded (.ogg) audio
+    var transcodeFormat: String = "m4a" // "m4a" (AAC) or "mp3" (libmp3lame)
 
     init() {}
 
@@ -143,6 +144,7 @@ struct Settings: Codable {
         serverPort = v(.serverPort, 8080)
         serverEnabled = v(.serverEnabled, false)
         transcodeKbps = v(.transcodeKbps, 256)
+        transcodeFormat = v(.transcodeFormat, "m4a")
     }
 }
 

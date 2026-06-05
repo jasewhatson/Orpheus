@@ -43,6 +43,15 @@ struct SettingsScreen: View {
                                                            port: app.settings.serverPort, enabled: $0) }))
                     }
                     sep
+                    SettingsRow(icon: "spinner-disc", iconBg: Color(hex: "67d2f0"),
+                                title: "Audio codec", sub: "MP3 = faster on the server",
+                                onTap: { app.cycleFormat() }) {
+                        HStack(spacing: 4) {
+                            Text(app.transcodeFormatLabel).font(.system(size: 14)).foregroundStyle(pal.text2)
+                            AuraIcon(name: "chev", size: 16, color: pal.text4)
+                        }
+                    }
+                    sep
                     SettingsRow(icon: "sparkle", iconBg: Color(hex: "b58cf2"),
                                 title: "Streaming bitrate", sub: "Transcoded audio (.ogg/.opus)",
                                 onTap: { app.cycleBitrate() }) {

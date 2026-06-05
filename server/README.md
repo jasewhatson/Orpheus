@@ -70,17 +70,21 @@ All responses include permissive CORS headers (`Access-Control-Allow-Origin: *`)
 | GET | `/playlists/{playlist}` | `{ id, name, tracks: [Track…] }` |
 | GET | `/playlists/{playlist}/tracks/{file}` | a single `Track` |
 | GET | `/playlists/{playlist}/tracks/{file}/audio` | audio bytes, **Range-aware** (206) |
-| GET | `/playlists/{playlist}/tracks/{file}/audio?format=m4a[&bitrate=256]` | **transcoded** to AAC/m4a (for `.ogg`/`.opus`) |
+| GET | `/playlists/{playlist}/tracks/{file}/audio?format=m4a\|mp3[&bitrate=256]` | **transcoded** (for `.ogg`/`.opus`) |
 | GET | `/playlists/{playlist}/tracks/{file}/lyrics` | `.lrc` text, or 404 |
 | GET | `/playlists/{playlist}/tracks/{file}/artwork` | embedded cover image, or 404 |
 
 ### Transcoding (`?format=m4a`)
 
 Apple's `AVPlayer` (iOS) can't decode Ogg Vorbis/Opus. Requesting
-`/audio?format=m4a` transcodes non-native formats to AAC in an `.m4a` container
-using **ffmpeg** (`-c:a aac -b:a 256k -movflags +faststart`). Native formats
-(`.mp3 .m4a .aac .flac .wav .alac .aif/.aiff .caf`) are always served as-is, even
-with `?format=m4a`.
+`/audio?format=…` transcodes non-native formats with **ffmpeg**:
+
+- `format=m4a` (or `aac`) → AAC in an `.m4a` container (`-c:a aac -movflags +faststart`).
+- `format=mp3` → MP3 via `-c:a libmp3lame` — **much faster to encode on ARM**
+  (e.g. Raspberry Pi), at a small quality cost vs AAC per bit.
+
+Native formats (`.mp3 .m4a .aac .flac .wav .alac .aif/.aiff .caf`) are always
+served as-is. `/health` reports `libmp3lame` and the available `formats`.
 
 - `bitrate` (kbps) selects the AAC rate; clamped to {96, 128, 160, 192, 256,
   320}, default 256. Each rate is cached separately.

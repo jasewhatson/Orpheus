@@ -78,6 +78,20 @@ FFMPEG_THREADS = 0          # 0 = let ffmpeg auto-pick (use all cores)
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None
 HAVE_FFPROBE = shutil.which("ffprobe") is not None
 
+
+def _encoder_available(name):
+    if not HAVE_FFMPEG:
+        return False
+    try:
+        out = subprocess.check_output(["ffmpeg", "-hide_banner", "-encoders"],
+                                      stderr=subprocess.DEVNULL)
+        return name.encode("ascii") in out
+    except Exception:
+        return False
+
+
+HAVE_LAME = _encoder_available("libmp3lame")
+
 # In-memory probe cache: realpath -> (mtime, size, meta-dict)
 _probe_cache = {}
 _probe_guard = threading.Lock()
@@ -96,31 +110,45 @@ def _key_lock(key):
         return lk
 
 
-def ensure_transcoded(src, bitrate=DEFAULT_BITRATE):
-    """Transcode `src` to a cached AAC/m4a file at `bitrate` kbps. Returns its
-    path, or None if ffmpeg is unavailable or the transcode fails. Cached by
-    source path+size+mtime+bitrate so edits/rate-changes invalidate."""
+# fmt -> (file extension, response MIME, ffmpeg output args)
+def _codec_args(fmt, bitrate):
+    br = "{}k".format(bitrate)
+    if fmt == "mp3":
+        # MP3 (libmp3lame) — much faster to encode on ARM than native AAC.
+        return "mp3", "audio/mpeg", ["-c:a", "libmp3lame", "-b:a", br, "-f", "mp3"]
+    # AAC in an m4a (ipod) container. -f ipod forces the muxer (the ".tmp"
+    # extension would otherwise confuse ffmpeg). +faststart for progressive play.
+    return "m4a", "audio/mp4", ["-c:a", "aac", "-b:a", br, "-movflags", "+faststart", "-f", "ipod"]
+
+
+def transcode_mime(fmt):
+    return "audio/mpeg" if fmt == "mp3" else "audio/mp4"
+
+
+def ensure_transcoded(src, bitrate=DEFAULT_BITRATE, fmt="m4a"):
+    """Transcode `src` to a cached file at `bitrate` kbps in `fmt` (m4a/aac or
+    mp3). Returns its path, or None if ffmpeg is unavailable or the transcode
+    fails. Cached by source path+size+mtime+bitrate+fmt so edits/rate/codec
+    changes invalidate."""
     if not HAVE_FFMPEG:
         return None
     try:
         st = os.stat(src)
     except OSError:
         return None
-    raw = "{}|{}|{}|{}".format(os.path.realpath(src), st.st_size, int(st.st_mtime), bitrate)
+    ext, _mime, out_args = _codec_args(fmt, bitrate)
+    raw = "{}|{}|{}|{}|{}".format(os.path.realpath(src), st.st_size, int(st.st_mtime), bitrate, fmt)
     key = hashlib.sha1(raw.encode("utf-8")).hexdigest()
-    dest = os.path.join(TRANSCODE_DIR, key + ".m4a")
+    dest = os.path.join(TRANSCODE_DIR, key + "." + ext)
     if os.path.isfile(dest) and os.path.getsize(dest) > 0:
         return dest
     with _key_lock(key):
         if os.path.isfile(dest) and os.path.getsize(dest) > 0:
             return dest
         tmp = dest + ".tmp"
-        # -threads lets ffmpeg use multiple cores (0 = auto). -f ipod forces the
-        # m4a/AAC muxer; without it ffmpeg infers the container from ".tmp" and fails.
+        # -threads lets ffmpeg use multiple cores (0 = auto).
         cmd = ["ffmpeg", "-nostdin", "-y", "-threads", str(FFMPEG_THREADS),
-               "-i", src, "-vn",
-               "-c:a", "aac", "-b:a", "{}k".format(bitrate),
-               "-movflags", "+faststart", "-f", "ipod", tmp]
+               "-i", src, "-vn"] + out_args + [tmp]
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.PIPE)
@@ -549,6 +577,8 @@ class Handler(BaseHTTPRequestHandler):
             "mutagen": HAVE_MUTAGEN,
             "ffmpeg": HAVE_FFMPEG,
             "ffprobe": HAVE_FFPROBE,
+            "libmp3lame": HAVE_LAME,
+            "formats": ["m4a"] + (["mp3"] if HAVE_LAME else []),
         })
 
     def _list_playlists(self):
@@ -609,15 +639,18 @@ class Handler(BaseHTTPRequestHandler):
         if f is None:
             return self._error(404, "track not found")
         ext = os.path.splitext(fname)[1].lower()
-        # Transcode non-native formats (e.g. .ogg) to AAC/m4a on request so
+        # Transcode non-native formats (e.g. .ogg) to AAC/m4a or MP3 on request so
         # AVPlayer can play them; native formats are always served as-is.
-        if fmt in ("m4a", "aac") and ext not in NATIVE_EXTS:
+        if fmt in ("m4a", "aac", "mp3") and ext not in NATIVE_EXTS:
             if not HAVE_FFMPEG:
                 return self._error(503, "transcoding unavailable (ffmpeg not installed)")
-            dest = ensure_transcoded(f, bitrate)
+            if fmt == "mp3" and not HAVE_LAME:
+                return self._error(503, "mp3 transcoding unavailable (libmp3lame not built into ffmpeg)")
+            codec = "mp3" if fmt == "mp3" else "m4a"
+            dest = ensure_transcoded(f, bitrate, codec)
             if dest is None:
                 return self._error(502, "transcode failed")
-            return self._serve_range(dest, "audio/mp4")
+            return self._serve_range(dest, transcode_mime(codec))
         mime = AUDIO_MIME.get(ext, "application/octet-stream")
         self._serve_range(f, mime)
 
@@ -757,6 +790,7 @@ def main(argv=None):
     print("  metadata: " + meta_src + " (tags/duration/artwork)")
     print("  ffmpeg:   " + ("yes" if HAVE_FFMPEG else "no (.ogg/.opus won't transcode)")
           + (" (threads: " + ("auto" if FFMPEG_THREADS == 0 else str(FFMPEG_THREADS)) + ")" if HAVE_FFMPEG else ""))
+    print("  codecs:   " + ", ".join(["aac/m4a"] + (["mp3"] if HAVE_LAME else [])))
     print("  cache:    " + TRANSCODE_DIR)
     print("  serving:  http://{}:{}".format(args.host, args.port))
     print("  endpoints: /health  /playlists  /playlists/{name}  "
