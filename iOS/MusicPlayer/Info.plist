@@ -7,16 +7,15 @@
 	<array>
 		<string>audio</string>
 	</array>
-	<!-- Allow plain-HTTP connections to the user-configured music server.
-	     NSAllowsLocalNetworking covers RFC-1918 LAN addresses (192.168.x.x) and
-	     .local hosts; NSAllowsArbitraryLoads additionally covers Tailscale's
-	     100.64.0.0/10 (CGNAT) addresses and MagicDNS .ts.net hostnames, since
-	     the server address is user-supplied and may not be RFC-1918. -->
+	<!-- Allow plain-HTTP connections to the user-configured music server (LAN,
+	     Tailscale 100.64.0.0/10 CGNAT, or MagicDNS .ts.net). The address is
+	     user-supplied and may not be RFC-1918, so ATS is fully disabled.
+	     NOTE: do NOT also add NSAllowsLocalNetworking — on iOS 10+ its presence
+	     makes the system ignore NSAllowsArbitraryLoads (the bug that blocked
+	     http://100.x Tailscale addresses). -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 </dict>
