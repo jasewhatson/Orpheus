@@ -82,6 +82,9 @@ final class AudioEngine {
         if url.pathExtension.lowercased() == "m3u8" {
             // HLS — AVPlayer fetches/caches segments itself; don't whole-file cache.
             item = AVPlayerItem(url: url)
+            // Pull several segments ahead so the (VOD) buffer fills fast across the
+            // server's parallel transcoders — smooth playback after a short prebuffer.
+            item.preferredForwardBufferDuration = 60
         } else {
             // Prefer a cached local copy; otherwise stream and cache in background.
             let cache = CacheStore.shared

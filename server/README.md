@@ -90,13 +90,18 @@ served as-is. `/health` reports `libmp3lame` and the available `formats`.
 
 ### HLS (`hls.m3u8`) — optional, low latency
 
-`?...hls.m3u8` runs a single continuous ffmpeg HLS encode that writes ~10s
-segments and a growing **EVENT** playlist. The client (AVPlayer) starts as soon
-as the first segment exists (~1-3s instead of transcoding the whole file), and
-seeks within what's produced; the encode is gapless and converges to a fully
-seekable VOD (`#EXT-X-ENDLIST`) that replays instantly. Segments are cached
-under `<cache-dir>/hls/<key>/`. Honors `format` (aac/mp3) and `bitrate`. The
-iOS app enables this via Settings → Music server → "Live streaming (HLS)".
+`?...hls.m3u8` returns a **complete VOD playlist** (all segments + `#EXT-X-ENDLIST`,
+computed from the track's duration) immediately, then transcodes each ~10s
+segment **on demand** when AVPlayer requests it (`/hls/<key>/seg####.ts`).
+Because the playlist is VOD, the player buffers several segments ahead instead
+of hugging a live edge (which is what caused stutter) — those ahead-of-time
+requests transcode **in parallel across all cores**, and the first few are
+pre-warmed on playlist load. Segments are cached under `<cache-dir>/hls/<key>/`
+for instant, fully-seekable replays. Honors `format` (aac/mp3) and `bitrate`.
+Enabled in the app via Settings → Music server → "Live streaming (HLS)".
+
+Trade-off: segments are encoded independently, so a lossy codec can introduce
+small boundary artifacts; 10s segments keep boundaries infrequent.
 
 - `bitrate` (kbps) selects the AAC rate; clamped to {96, 128, 160, 192, 256,
   320}, default 256. Each rate is cached separately.
