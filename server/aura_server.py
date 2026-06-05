@@ -48,7 +48,7 @@ try:
 except Exception:  # pragma: no cover - mutagen is optional
     HAVE_MUTAGEN = False
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CHUNK = 64 * 1024
 
 # Audio extensions we serve, mapped to their MIME type.
@@ -285,16 +285,37 @@ def ensure_segment(key, i):
             return None
 
 
-def hls_prewarm(key, count):
-    """Kick off the first `count` segment transcodes in the background pool so
-    the player's initial buffer fills fast across all cores."""
+_hls_submitted = {}          # key -> set(segment indices already queued)
+_hls_sub_guard = threading.Lock()
+
+
+def _segment_count(key):
+    try:
+        with open(os.path.join(TRANSCODE_DIR, "hls", key, "meta.json")) as fh:
+            m = json.load(fh)
+        return int(math.ceil(m["dur"] / float(m["T"])))
+    except (OSError, IOError, ValueError, KeyError):
+        return 0
+
+
+def hls_prewarm_ahead(key, start, count):
+    """Queue transcodes for segments [start, start+count) that haven't been
+    queued yet — a rolling window that keeps the transcode front ahead of the
+    play head (across all cores) so the player never waits on a segment."""
     if _seg_pool is None:
         return
-    for i in range(count):
+    n = _segment_count(key)
+    if n <= 0:
+        return
+    with _hls_sub_guard:
+        sub = _hls_submitted.setdefault(key, set())
+        todo = [i for i in range(max(0, start), min(start + count, n)) if i not in sub]
+        sub.update(todo)
+    for i in todo:
         try:
             _seg_pool.submit(ensure_segment, key, i)
         except Exception:
-            return
+            pass
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -813,8 +834,8 @@ class Handler(BaseHTTPRequestHandler):
         if res is None:
             return self._error(502, "hls prepare failed (unknown duration?)")
         d, key, dur, segs = res
-        # Pre-warm the first segments in parallel so the player's buffer fills fast.
-        hls_prewarm(key, min(segs, PREWARM_SEGMENTS))
+        # Pre-warm the first window in parallel so the player's buffer fills fast.
+        hls_prewarm_ahead(key, 0, PREWARM_SEGMENTS)
         self._send_m3u8(hls_playlist_text(key, dur, HLS_SEGMENT_SECONDS))
 
     def _hls_file(self, key: str, name: str):
@@ -831,7 +852,10 @@ class Handler(BaseHTTPRequestHandler):
         seg = re.match(r"^seg(\d+)\.ts$", name)
         if not seg:
             return self._error(404, "not found")
-        dest = ensure_segment(key, int(seg.group(1)))
+        i = int(seg.group(1))
+        # Keep the transcode front ahead of the play head (rolling window).
+        hls_prewarm_ahead(key, i + 1, PREWARM_SEGMENTS)
+        dest = ensure_segment(key, i)
         if dest is None:
             return self._error(404, "segment unavailable")
         self._serve_range(dest, "video/mp2t")

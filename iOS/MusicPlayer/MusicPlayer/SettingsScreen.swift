@@ -140,7 +140,7 @@ struct SettingsScreen: View {
                             .background(pal.surface1, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(pal.line, lineWidth: 0.5))
                     }.press()
-                    Text("AURA · v2.4.0 · Made for trance").font(.system(size: 12)).foregroundStyle(pal.text4)
+                    Text("AURA · v\(appVersion) · Made for trance").font(.system(size: 12)).foregroundStyle(pal.text4)
                 }
                 .padding(.horizontal, 20).padding(.top, 26).padding(.bottom, 10)
             }
@@ -148,6 +148,15 @@ struct SettingsScreen: View {
         }
         .scrollIndicators(.hidden)
         .onAppear { app.refreshCacheUsage() }
+    }
+
+    /// Marketing version + build number from the bundle, so the running build is
+    /// identifiable on-device (helps confirm a redeploy actually took).
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let v = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (\(b))"
     }
 
     private func fmtBytes(_ b: Int64) -> String {
