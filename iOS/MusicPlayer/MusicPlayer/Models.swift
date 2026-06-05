@@ -123,6 +123,7 @@ struct Settings: Codable {
     var serverHost: String = "192.168.20.10"
     var serverPort: Int = 8080
     var serverEnabled: Bool = false
+    var transcodeKbps: Int = 256   // AAC bitrate requested for transcoded (.ogg) audio
 
     init() {}
 
@@ -141,6 +142,7 @@ struct Settings: Codable {
         serverHost = v(.serverHost, "192.168.20.10")
         serverPort = v(.serverPort, 8080)
         serverEnabled = v(.serverEnabled, false)
+        transcodeKbps = v(.transcodeKbps, 256)
     }
 }
 

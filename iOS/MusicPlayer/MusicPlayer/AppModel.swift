@@ -226,8 +226,21 @@ final class AppModel {
         guard let base = t.audioURL else { return AppModel.url(for: t.id) }
         guard needsTranscode(t.fileExt),
               var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return base }
-        comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: "format", value: "m4a")]
+        comps.queryItems = (comps.queryItems ?? []) + [
+            URLQueryItem(name: "format", value: "m4a"),
+            URLQueryItem(name: "bitrate", value: String(settings.transcodeKbps)),
+        ]
         return comps.url ?? base
+    }
+
+    static let bitrateOptions = [128, 192, 256, 320]
+
+    func cycleBitrate() {
+        let opts = AppModel.bitrateOptions
+        let i = opts.firstIndex(of: settings.transcodeKbps) ?? 2
+        settings.transcodeKbps = opts[(i + 1) % opts.count]
+        // Applies to the next track loaded (the cache key includes the bitrate,
+        // so a new rate fetches a fresh stream rather than reusing the old one).
     }
 
     private func needsTranscode(_ ext: String?) -> Bool {

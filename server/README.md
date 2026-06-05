@@ -70,7 +70,7 @@ All responses include permissive CORS headers (`Access-Control-Allow-Origin: *`)
 | GET | `/playlists/{playlist}` | `{ id, name, tracks: [Track…] }` |
 | GET | `/playlists/{playlist}/tracks/{file}` | a single `Track` |
 | GET | `/playlists/{playlist}/tracks/{file}/audio` | audio bytes, **Range-aware** (206) |
-| GET | `/playlists/{playlist}/tracks/{file}/audio?format=m4a` | **transcoded** to AAC/m4a (for `.ogg`/`.opus`) |
+| GET | `/playlists/{playlist}/tracks/{file}/audio?format=m4a[&bitrate=256]` | **transcoded** to AAC/m4a (for `.ogg`/`.opus`) |
 | GET | `/playlists/{playlist}/tracks/{file}/lyrics` | `.lrc` text, or 404 |
 | GET | `/playlists/{playlist}/tracks/{file}/artwork` | embedded cover image, or 404 |
 
@@ -82,6 +82,10 @@ using **ffmpeg** (`-c:a aac -b:a 256k -movflags +faststart`). Native formats
 (`.mp3 .m4a .aac .flac .wav .alac .aif/.aiff .caf`) are always served as-is, even
 with `?format=m4a`.
 
+- `bitrate` (kbps) selects the AAC rate; clamped to {96, 128, 160, 192, 256,
+  320}, default 256. Each rate is cached separately.
+- `--ffmpeg-threads N` (or `FFMPEG_THREADS`) sets threads per transcode
+  (0 = auto/all cores). Different tracks also transcode concurrently.
 - Requires ffmpeg on the host: `sudo apt install ffmpeg` (Raspberry Pi) /
   `brew install ffmpeg`. `/health` reports `"ffmpeg": true/false`.
 - Transcodes are cached to disk (`--cache-dir`, default system-temp

@@ -43,6 +43,15 @@ struct SettingsScreen: View {
                                                            port: app.settings.serverPort, enabled: $0) }))
                     }
                     sep
+                    SettingsRow(icon: "sparkle", iconBg: Color(hex: "b58cf2"),
+                                title: "Streaming bitrate", sub: "Transcoded audio (.ogg/.opus)",
+                                onTap: { app.cycleBitrate() }) {
+                        HStack(spacing: 4) {
+                            Text("\(app.settings.transcodeKbps) kbps").font(.system(size: 14)).foregroundStyle(pal.text2)
+                            AuraIcon(name: "chev", size: 16, color: pal.text4)
+                        }
+                    }
+                    sep
                     SettingsRow(icon: "cast", iconBg: Color(hex: "f0a36b"),
                                 title: "Test connection", onTap: { app.testConnection() }) {
                         Text("Test").font(.system(size: 14, weight: .semibold)).foregroundStyle(pal.accent)

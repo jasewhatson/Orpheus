@@ -66,9 +66,15 @@ AUDIO_MIME = {
 NATIVE_EXTS = set([".mp3", ".m4a", ".aac", ".flac", ".wav", ".alac",
                    ".aif", ".aiff", ".caf"])
 
+# Allowed transcode bitrates (kbps). Requests are clamped to this set so the
+# transcode cache can't be blown up with arbitrary values.
+ALLOWED_BITRATES = [96, 128, 160, 192, 256, 320]
+DEFAULT_BITRATE = 256
+
 # Set in main().
 ROOT = ""
 TRANSCODE_DIR = ""
+FFMPEG_THREADS = 0          # 0 = let ffmpeg auto-pick (use all cores)
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None
 HAVE_FFPROBE = shutil.which("ffprobe") is not None
 
@@ -90,17 +96,17 @@ def _key_lock(key):
         return lk
 
 
-def ensure_transcoded(src):
-    """Transcode `src` to a cached AAC/m4a file. Returns its path, or None if
-    ffmpeg is unavailable or the transcode fails. Cached by source
-    path+size+mtime so edits invalidate; reused on subsequent requests."""
+def ensure_transcoded(src, bitrate=DEFAULT_BITRATE):
+    """Transcode `src` to a cached AAC/m4a file at `bitrate` kbps. Returns its
+    path, or None if ffmpeg is unavailable or the transcode fails. Cached by
+    source path+size+mtime+bitrate so edits/rate-changes invalidate."""
     if not HAVE_FFMPEG:
         return None
     try:
         st = os.stat(src)
     except OSError:
         return None
-    raw = "{}|{}|{}".format(os.path.realpath(src), st.st_size, int(st.st_mtime))
+    raw = "{}|{}|{}|{}".format(os.path.realpath(src), st.st_size, int(st.st_mtime), bitrate)
     key = hashlib.sha1(raw.encode("utf-8")).hexdigest()
     dest = os.path.join(TRANSCODE_DIR, key + ".m4a")
     if os.path.isfile(dest) and os.path.getsize(dest) > 0:
@@ -109,11 +115,12 @@ def ensure_transcoded(src):
         if os.path.isfile(dest) and os.path.getsize(dest) > 0:
             return dest
         tmp = dest + ".tmp"
-        # -f ipod forces the m4a/AAC muxer; without it ffmpeg would try to infer
-        # the container from the ".tmp" extension and fail.
-        cmd = ["ffmpeg", "-nostdin", "-y", "-i", src, "-vn",
-               "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart",
-               "-f", "ipod", tmp]
+        # -threads lets ffmpeg use multiple cores (0 = auto). -f ipod forces the
+        # m4a/AAC muxer; without it ffmpeg infers the container from ".tmp" and fails.
+        cmd = ["ffmpeg", "-nostdin", "-y", "-threads", str(FFMPEG_THREADS),
+               "-i", src, "-vn",
+               "-c:a", "aac", "-b:a", "{}k".format(bitrate),
+               "-movflags", "+faststart", "-f", "ipod", tmp]
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.PIPE)
@@ -508,7 +515,8 @@ class Handler(BaseHTTPRequestHandler):
                 pl, fname, sub = parts[1], parts[3], parts[4]
                 if sub == "audio":
                     fmt = (query.get("format") or [None])[0]
-                    return self._track_audio(pl, fname, fmt)
+                    bitrate = self._bitrate(query)
+                    return self._track_audio(pl, fname, fmt, bitrate)
                 if sub == "lyrics":
                     return self._track_lyrics(pl, fname)
                 if sub == "artwork":
@@ -586,7 +594,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "track not found")
         self._json(track_json(pl, fname, f))
 
-    def _track_audio(self, pl: str, fname: str, fmt=None):
+    def _bitrate(self, query):
+        """Validated transcode bitrate (kbps) from the query, clamped to the
+        allowed set."""
+        raw = (query.get("bitrate") or query.get("br") or [None])[0]
+        try:
+            v = int(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_BITRATE
+        return v if v in ALLOWED_BITRATES else DEFAULT_BITRATE
+
+    def _track_audio(self, pl: str, fname: str, fmt=None, bitrate=DEFAULT_BITRATE):
         f = self._resolve_track(pl, fname)
         if f is None:
             return self._error(404, "track not found")
@@ -596,7 +614,7 @@ class Handler(BaseHTTPRequestHandler):
         if fmt in ("m4a", "aac") and ext not in NATIVE_EXTS:
             if not HAVE_FFMPEG:
                 return self._error(503, "transcoding unavailable (ffmpeg not installed)")
-            dest = ensure_transcoded(f)
+            dest = ensure_transcoded(f, bitrate)
             if dest is None:
                 return self._error(502, "transcode failed")
             return self._serve_range(dest, "audio/mp4")
@@ -715,16 +733,20 @@ def main(argv=None):
     parser.add_argument("--cache-dir", default=os.environ.get("TRANSCODE_DIR"),
                         help="where transcoded audio is cached "
                              "(default: system temp /aura-transcode)")
+    parser.add_argument("--ffmpeg-threads", type=int,
+                        default=int(os.environ.get("FFMPEG_THREADS", "0")),
+                        help="threads per ffmpeg transcode (0 = auto/all cores)")
     args = parser.parse_args(argv)
 
     if not args.root:
         parser.error("music root required: pass it as an argument or set MUSIC_ROOT")
 
-    global ROOT, TRANSCODE_DIR
+    global ROOT, TRANSCODE_DIR, FFMPEG_THREADS
     ROOT = os.path.realpath(os.path.expanduser(args.root))
     if not os.path.isdir(ROOT):
         parser.error("not a directory: {}".format(ROOT))
 
+    FFMPEG_THREADS = max(0, args.ffmpeg_threads)
     TRANSCODE_DIR = args.cache_dir or os.path.join(tempfile.gettempdir(), "aura-transcode")
     os.makedirs(TRANSCODE_DIR, exist_ok=True)
 
@@ -733,11 +755,13 @@ def main(argv=None):
     print("  root:     " + ROOT)
     meta_src = "mutagen" if HAVE_MUTAGEN else ("ffprobe" if HAVE_FFPROBE else "filenames only")
     print("  metadata: " + meta_src + " (tags/duration/artwork)")
-    print("  ffmpeg:   " + ("yes" if HAVE_FFMPEG else "no (.ogg/.opus won't transcode)"))
+    print("  ffmpeg:   " + ("yes" if HAVE_FFMPEG else "no (.ogg/.opus won't transcode)")
+          + (" (threads: " + ("auto" if FFMPEG_THREADS == 0 else str(FFMPEG_THREADS)) + ")" if HAVE_FFMPEG else ""))
     print("  cache:    " + TRANSCODE_DIR)
     print("  serving:  http://{}:{}".format(args.host, args.port))
     print("  endpoints: /health  /playlists  /playlists/{name}  "
           ".../tracks/{file}[/audio|/lyrics|/artwork]")
+    sys.stdout.flush()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
