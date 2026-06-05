@@ -7,10 +7,15 @@
 	<array>
 		<string>audio</string>
 	</array>
-	<!-- Allow plain-HTTP connections to the local-network music server
-	     (private/RFC-1918 addresses such as 192.168.x.x and .local hosts). -->
+	<!-- Allow plain-HTTP connections to the user-configured music server.
+	     NSAllowsLocalNetworking covers RFC-1918 LAN addresses (192.168.x.x) and
+	     .local hosts; NSAllowsArbitraryLoads additionally covers Tailscale's
+	     100.64.0.0/10 (CGNAT) addresses and MagicDNS .ts.net hostnames, since
+	     the server address is user-supplied and may not be RFC-1918. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
