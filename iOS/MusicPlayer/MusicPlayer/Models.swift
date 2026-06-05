@@ -125,6 +125,7 @@ struct Settings: Codable {
     var serverEnabled: Bool = false
     var transcodeKbps: Int = 256       // bitrate requested for transcoded (.ogg) audio
     var transcodeFormat: String = "m4a" // "m4a" (AAC) or "mp3" (libmp3lame)
+    var hlsEnabled: Bool = false        // stream transcoded tracks via HLS (instant start)
 
     init() {}
 
@@ -145,6 +146,7 @@ struct Settings: Codable {
         serverEnabled = v(.serverEnabled, false)
         transcodeKbps = v(.transcodeKbps, 256)
         transcodeFormat = v(.transcodeFormat, "m4a")
+        hlsEnabled = v(.hlsEnabled, false)
     }
 }
 

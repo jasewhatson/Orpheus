@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -168,6 +169,78 @@ def _quiet_remove(path):
         os.remove(path)
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# HLS (HTTP Live Streaming) — optional low-latency transcode
+#
+# Instead of transcoding the whole file before sending a byte, run one ffmpeg
+# HLS encode that writes ~10s segments + a growing EVENT playlist. The client
+# (AVPlayer) starts as soon as the first segment exists (~1-3s) and seeks within
+# what's produced; the encode is gapless (single continuous pass) and the
+# segments persist for instant, fully-seekable replays.
+# --------------------------------------------------------------------------- #
+
+HLS_SEGMENT_SECONDS = 10
+_hls_started = {}            # key -> ffmpeg Popen
+_hls_guard = threading.Lock()
+
+
+def _hls_audio_args(fmt, bitrate):
+    br = "{}k".format(bitrate)
+    if fmt == "mp3":
+        return ["-c:a", "libmp3lame", "-b:a", br]
+    return ["-c:a", "aac", "-b:a", br]
+
+
+def _hls_key(src_real, size, mtime, bitrate, fmt):
+    raw = "{}|{}|{}|{}|{}|hls".format(src_real, size, mtime, bitrate, fmt)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _hls_complete(index_path):
+    try:
+        with open(index_path, "r") as fh:
+            return "#EXT-X-ENDLIST" in fh.read()
+    except (OSError, IOError):
+        return False
+
+
+def ensure_hls(src, bitrate, fmt):
+    """Ensure an HLS encode for (src, bitrate, fmt) is running or done. Returns
+    (dir, key) or None if ffmpeg is unavailable."""
+    if not HAVE_FFMPEG:
+        return None
+    try:
+        st = os.stat(src)
+    except OSError:
+        return None
+    key = _hls_key(os.path.realpath(src), st.st_size, int(st.st_mtime), bitrate, fmt)
+    d = os.path.join(TRANSCODE_DIR, "hls", key)
+    index = os.path.join(d, "index.m3u8")
+    with _hls_guard:
+        if key in _hls_started or _hls_complete(index):
+            return d, key
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            return None
+        cmd = ["ffmpeg", "-nostdin", "-y", "-threads", str(FFMPEG_THREADS),
+               "-i", src, "-vn"] + _hls_audio_args(fmt, bitrate) + [
+            "-f", "hls",
+            "-hls_time", str(HLS_SEGMENT_SECONDS),
+            "-hls_playlist_type", "event",
+            "-hls_list_size", "0",
+            "-hls_flags", "temp_file",
+            "-hls_base_url", "/hls/" + key + "/",
+            "-hls_segment_filename", os.path.join(d, "seg%04d.ts"),
+            index]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            return None
+        _hls_started[key] = proc
+    return d, key
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -537,6 +610,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._list_playlists()
             if len(parts) == 2 and parts[0] == "playlists":
                 return self._playlist_detail(parts[1])
+            # HLS segment/playlist files: /hls/<key>/<name>
+            if len(parts) == 3 and parts[0] == "hls":
+                return self._hls_file(parts[1], parts[2])
             if len(parts) == 4 and parts[0] == "playlists" and parts[2] == "tracks":
                 return self._track_detail(parts[1], parts[3])
             if len(parts) == 5 and parts[0] == "playlists" and parts[2] == "tracks":
@@ -545,6 +621,10 @@ class Handler(BaseHTTPRequestHandler):
                     fmt = (query.get("format") or [None])[0]
                     bitrate = self._bitrate(query)
                     return self._track_audio(pl, fname, fmt, bitrate)
+                if sub == "hls.m3u8":
+                    fmt = (query.get("format") or [None])[0]
+                    bitrate = self._bitrate(query)
+                    return self._track_hls(pl, fname, fmt, bitrate)
                 if sub == "lyrics":
                     return self._track_lyrics(pl, fname)
                 if sub == "artwork":
@@ -653,6 +733,69 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_range(dest, transcode_mime(codec))
         mime = AUDIO_MIME.get(ext, "application/octet-stream")
         self._serve_range(f, mime)
+
+    # ---- HLS ----
+
+    def _track_hls(self, pl: str, fname: str, fmt=None, bitrate=DEFAULT_BITRATE):
+        f = self._resolve_track(pl, fname)
+        if f is None:
+            return self._error(404, "track not found")
+        if not HAVE_FFMPEG:
+            return self._error(503, "hls unavailable (ffmpeg not installed)")
+        codec = "mp3" if fmt == "mp3" else "aac"
+        if codec == "mp3" and not HAVE_LAME:
+            return self._error(503, "mp3 hls unavailable (libmp3lame not built into ffmpeg)")
+        res = ensure_hls(f, bitrate, codec)
+        if res is None:
+            return self._error(502, "hls start failed")
+        d, _key = res
+        index = os.path.join(d, "index.m3u8")
+        deadline = time.time() + 30
+        while not os.path.exists(index) and time.time() < deadline:
+            time.sleep(0.1)
+        try:
+            with open(index, "rb") as fh:
+                data = fh.read()
+        except (OSError, IOError):
+            return self._error(504, "hls playlist not ready")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def _hls_file(self, key: str, name: str):
+        if not re.match(r"^[0-9a-f]{40}$", key):
+            return self._error(404, "not found")
+        if name != "index.m3u8" and not re.match(r"^seg\d+\.ts$", name):
+            return self._error(404, "not found")
+        base = os.path.join(TRANSCODE_DIR, "hls")
+        path = os.path.join(base, key, name)
+        if not within(path, base):
+            return self._error(404, "not found")
+        # A segment may be requested moments before ffmpeg finishes writing it.
+        deadline = time.time() + 30
+        while not os.path.exists(path) and time.time() < deadline:
+            time.sleep(0.05)
+        if not os.path.isfile(path):
+            return self._error(404, "not found")
+        if name.endswith(".m3u8"):
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+            except (OSError, IOError):
+                return self._error(500, "cannot read playlist")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+        else:
+            self._serve_range(path, "video/mp2t")
 
     def _track_lyrics(self, pl: str, fname: str):
         f = self._resolve_track(pl, fname)

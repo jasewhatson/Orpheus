@@ -224,13 +224,16 @@ final class AppModel {
     /// AAC transcode for non-native formats); demo tracks use the sample mapping.
     func playbackURL(for t: Track) -> URL {
         guard let base = t.audioURL else { return AppModel.url(for: t.id) }
-        guard needsTranscode(t.fileExt),
-              var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return base }
-        comps.queryItems = (comps.queryItems ?? []) + [
+        guard needsTranscode(t.fileExt) else { return base }   // native: serve as-is
+        // base is .../tracks/<file>/audio
+        let endpoint = settings.hlsEnabled ? "hls.m3u8" : "audio"
+        let url = base.deletingLastPathComponent().appendingPathComponent(endpoint)
+        guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        comps.queryItems = [
             URLQueryItem(name: "format", value: settings.transcodeFormat),
             URLQueryItem(name: "bitrate", value: String(settings.transcodeKbps)),
         ]
-        return comps.url ?? base
+        return comps.url ?? url
     }
 
     static let bitrateOptions = [128, 192, 256, 320]
@@ -363,7 +366,7 @@ final class AppModel {
         let v = max(0, min(0.999, f))
         player.progress = v
         currentTime = duration * v
-        engine.seek(toFraction: v)
+        engine.seek(toSeconds: duration * v)
     }
 
     func advance(auto: Bool) {

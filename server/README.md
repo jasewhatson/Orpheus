@@ -71,6 +71,8 @@ All responses include permissive CORS headers (`Access-Control-Allow-Origin: *`)
 | GET | `/playlists/{playlist}/tracks/{file}` | a single `Track` |
 | GET | `/playlists/{playlist}/tracks/{file}/audio` | audio bytes, **Range-aware** (206) |
 | GET | `/playlists/{playlist}/tracks/{file}/audio?format=m4a\|mp3[&bitrate=256]` | **transcoded** (for `.ogg`/`.opus`) |
+| GET | `/playlists/{playlist}/tracks/{file}/hls.m3u8?format=m4a\|mp3[&bitrate=256]` | **HLS** playlist (low-latency streaming transcode) |
+| GET | `/hls/{key}/index.m3u8`, `/hls/{key}/seg####.ts` | HLS playlist + segments (referenced by the above) |
 | GET | `/playlists/{playlist}/tracks/{file}/lyrics` | `.lrc` text, or 404 |
 | GET | `/playlists/{playlist}/tracks/{file}/artwork` | embedded cover image, or 404 |
 
@@ -85,6 +87,16 @@ Apple's `AVPlayer` (iOS) can't decode Ogg Vorbis/Opus. Requesting
 
 Native formats (`.mp3 .m4a .aac .flac .wav .alac .aif/.aiff .caf`) are always
 served as-is. `/health` reports `libmp3lame` and the available `formats`.
+
+### HLS (`hls.m3u8`) — optional, low latency
+
+`?...hls.m3u8` runs a single continuous ffmpeg HLS encode that writes ~10s
+segments and a growing **EVENT** playlist. The client (AVPlayer) starts as soon
+as the first segment exists (~1-3s instead of transcoding the whole file), and
+seeks within what's produced; the encode is gapless and converges to a fully
+seekable VOD (`#EXT-X-ENDLIST`) that replays instantly. Segments are cached
+under `<cache-dir>/hls/<key>/`. Honors `format` (aac/mp3) and `bitrate`. The
+iOS app enables this via Settings → Music server → "Live streaming (HLS)".
 
 - `bitrate` (kbps) selects the AAC rate; clamped to {96, 128, 160, 192, 256,
   320}, default 256. Each rate is cached separately.

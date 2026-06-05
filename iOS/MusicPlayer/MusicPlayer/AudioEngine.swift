@@ -78,13 +78,19 @@ final class AudioEngine {
     // MARK: Transport
 
     func load(url: URL, autoplay: Bool) {
-        // Prefer a cached local copy; otherwise stream and cache in background.
-        let cache = CacheStore.shared
-        let local = cache.localAudio(for: url)
-        let item = AVPlayerItem(url: local ?? url)
+        let item: AVPlayerItem
+        if url.pathExtension.lowercased() == "m3u8" {
+            // HLS — AVPlayer fetches/caches segments itself; don't whole-file cache.
+            item = AVPlayerItem(url: url)
+        } else {
+            // Prefer a cached local copy; otherwise stream and cache in background.
+            let cache = CacheStore.shared
+            let local = cache.localAudio(for: url)
+            item = AVPlayerItem(url: local ?? url)
+            if local == nil { cache.cacheAudioIfNeeded(url) }
+        }
         player.replaceCurrentItem(with: item)
         if autoplay { play() }
-        if local == nil { cache.cacheAudioIfNeeded(url) }
     }
 
     func play() {
@@ -95,10 +101,12 @@ final class AudioEngine {
 
     func pause() { player.pause() }
 
-    func seek(toFraction f: Double) {
-        let dur = player.currentItem?.duration.seconds ?? 0
-        guard dur.isFinite, dur > 0 else { return }
-        player.seek(to: CMTime(seconds: dur * f, preferredTimescale: 600))
+    /// Seek to an absolute time. Time-based (not fraction) so it works for HLS,
+    /// where the item duration can be indefinite.
+    func seek(toSeconds s: Double) {
+        guard s.isFinite, s >= 0 else { return }
+        player.seek(to: CMTime(seconds: s, preferredTimescale: 600),
+                    toleranceBefore: .positiveInfinity, toleranceAfter: .positiveInfinity)
     }
 
     // MARK: Now Playing info

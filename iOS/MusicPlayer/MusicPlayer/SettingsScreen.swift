@@ -61,6 +61,11 @@ struct SettingsScreen: View {
                         }
                     }
                     sep
+                    SettingsRow(icon: "radio", iconBg: Color(hex: "8affc0"),
+                                title: "Live streaming (HLS)", sub: "Start almost instantly; seekable") {
+                        AuraToggle(on: $app.settings.hlsEnabled)
+                    }
+                    sep
                     SettingsRow(icon: "cast", iconBg: Color(hex: "f0a36b"),
                                 title: "Test connection", onTap: { app.testConnection() }) {
                         Text("Test").font(.system(size: 14, weight: .semibold)).foregroundStyle(pal.accent)
