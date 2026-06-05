@@ -48,7 +48,7 @@ try:
 except Exception:  # pragma: no cover - mutagen is optional
     HAVE_MUTAGEN = False
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CHUNK = 64 * 1024
 
 # Audio extensions we serve, mapped to their MIME type.
@@ -176,20 +176,22 @@ def _quiet_remove(path):
 # HLS (HTTP Live Streaming) — optional low-latency transcode
 #
 # We serve a *complete VOD playlist up front* (computed from the track's
-# duration, with #EXT-X-ENDLIST), then transcode each ~10s segment **on demand**
-# when AVPlayer requests it. Because the playlist is VOD, AVPlayer buffers
-# aggressively (pulling several segments ahead) instead of hugging a live edge —
-# which is what caused the stutter with an EVENT playlist. The ahead-of-time
-# segment requests run in parallel, so all CPU cores are used; segments are
-# cached for instant, fully-seekable replays.
+# duration, with #EXT-X-ENDLIST) so AVPlayer buffers aggressively instead of
+# hugging a live edge. The segments themselves come from ONE continuous ffmpeg
+# HLS encode (gapless — only the stream start has encoder priming, so there are
+# no per-boundary gaps/artifacts), written in order. A segment request blocks
+# until that segment has been written, then serves it; segments persist for
+# instant, fully-seekable replays.
 #
-# Trade-off: segments are encoded independently, so a lossy codec can introduce
-# tiny boundary artifacts. 10s segments keep boundaries rare.
+# (An earlier version cut each segment independently with -ss/-t, which gave each
+# segment its own ~27ms of AAC priming -> audible gaps + wrong EXTINF every 10s.
+# A single continuous encode avoids that. Use MP3 (libmp3lame) for the fastest,
+# smoothest result on a Pi, since the one encoder must stay ahead of playback.)
 # --------------------------------------------------------------------------- #
 
 HLS_SEGMENT_SECONDS = 10
-PREWARM_SEGMENTS = 6         # how many segments to transcode ahead on playlist load
-_seg_pool = None             # ThreadPoolExecutor (set in main) for segment pre-warm
+_hls_started = {}            # key -> ffmpeg Popen (continuous encode)
+_hls_guard = threading.Lock()
 
 
 def _hls_audio_args(fmt, bitrate):
@@ -200,13 +202,48 @@ def _hls_audio_args(fmt, bitrate):
 
 
 def _hls_dir_key(src_real, size, mtime, bitrate, fmt):
-    raw = "{}|{}|{}|{}|{}|hlsvod".format(src_real, size, mtime, bitrate, fmt)
+    raw = "{}|{}|{}|{}|{}|hlscont".format(src_real, size, mtime, bitrate, fmt)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def _hls_index(d):
+    return os.path.join(d, "index.m3u8")
+
+
+def _hls_complete(d):
+    try:
+        with open(_hls_index(d)) as fh:
+            return "#EXT-X-ENDLIST" in fh.read()
+    except (OSError, IOError):
+        return False
+
+
+def _start_encode(key, d, src, bitrate, fmt):
+    """Start (once) the single continuous ffmpeg HLS encode for this key."""
+    with _hls_guard:
+        running = _hls_started.get(key)
+        if (running is not None and running.poll() is None) or _hls_complete(d):
+            return
+        cmd = ["ffmpeg", "-nostdin", "-y", "-threads", str(FFMPEG_THREADS),
+               "-i", src, "-vn"] + _hls_audio_args(fmt, bitrate) + [
+            "-f", "hls",
+            "-hls_time", str(HLS_SEGMENT_SECONDS),
+            "-hls_playlist_type", "vod",
+            "-hls_list_size", "0",
+            "-hls_flags", "temp_file",
+            "-hls_base_url", "/hls/" + key + "/",
+            "-hls_segment_filename", os.path.join(d, "seg%04d.ts"),
+            _hls_index(d)]
+        try:
+            _hls_started[key] = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                                 stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
 def hls_prepare(src, bitrate, fmt):
-    """Create the HLS dir + meta.json for (src,bitrate,fmt). Returns
-    (dir, key, duration, segs) or None (e.g. duration unknown)."""
+    """Create the HLS dir + meta.json and start the continuous encode. Returns
+    (dir, key, duration) or None (e.g. duration unknown)."""
     if not HAVE_FFMPEG:
         return None
     try:
@@ -231,13 +268,29 @@ def hls_prepare(src, bitrate, fmt):
                            "fmt": fmt, "dur": dur, "T": HLS_SEGMENT_SECONDS}, fh)
         except (OSError, IOError):
             return None
-    segs = int(math.ceil(dur / float(HLS_SEGMENT_SECONDS)))
-    return d, key, dur, segs
+    _start_encode(key, d, src, bitrate, fmt)
+    return d, key, dur
+
+
+def ensure_encode_for_key(key):
+    """Restart the continuous encode for a key from its meta.json (e.g. a direct
+    segment request, or after a server restart). Returns the dir or None."""
+    d = os.path.join(TRANSCODE_DIR, "hls", key)
+    try:
+        with open(os.path.join(d, "meta.json")) as fh:
+            m = json.load(fh)
+    except (OSError, IOError, ValueError):
+        return None
+    _start_encode(key, d, m["src"], m["bitrate"], m["fmt"])
+    return d
 
 
 def hls_playlist_text(key, dur, T):
+    """Synthetic VOD playlist served instantly (segments are gapless from the
+    continuous encode; EXTINF is a close estimate, refined to ffmpeg's exact
+    values once the encode finishes — see _track_hls)."""
     n = int(math.ceil(dur / float(T)))
-    lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:{}".format(T),
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:{}".format(T + 1),
              "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
     for i in range(n):
         seglen = T if i < n - 1 else (dur - (n - 1) * T)
@@ -247,75 +300,6 @@ def hls_playlist_text(key, dur, T):
         lines.append("/hls/{}/seg{:04d}.ts".format(key, i))
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
-
-
-def ensure_segment(key, i):
-    """Transcode HLS segment `i` for `key` on demand (cached). Returns path or None."""
-    d = os.path.join(TRANSCODE_DIR, "hls", key)
-    try:
-        with open(os.path.join(d, "meta.json")) as fh:
-            m = json.load(fh)
-    except (OSError, IOError, ValueError):
-        return None
-    dest = os.path.join(d, "seg{:04d}.ts".format(i))
-    if os.path.isfile(dest) and os.path.getsize(dest) > 0:
-        return dest
-    with _key_lock("seg:{}:{}".format(key, i)):
-        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
-            return dest
-        start = i * m["T"]
-        tmp = dest + ".tmp"
-        # -ss before -i = fast input seek. -threads 1 since we parallelise across
-        # segments (one ffmpeg per core) rather than within a segment.
-        cmd = ["ffmpeg", "-nostdin", "-y", "-threads", "1",
-               "-ss", str(start), "-t", str(m["T"]), "-i", m["src"], "-vn"] + \
-            _hls_audio_args(m["fmt"], m["bitrate"]) + \
-            ["-avoid_negative_ts", "make_zero", "-muxdelay", "0", "-muxpreload", "0",
-             "-f", "mpegts", tmp]
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            proc.communicate()
-            if proc.returncode != 0 or not os.path.isfile(tmp):
-                _quiet_remove(tmp)
-                return None
-            os.replace(tmp, dest)
-            return dest
-        except Exception:
-            _quiet_remove(tmp)
-            return None
-
-
-_hls_submitted = {}          # key -> set(segment indices already queued)
-_hls_sub_guard = threading.Lock()
-
-
-def _segment_count(key):
-    try:
-        with open(os.path.join(TRANSCODE_DIR, "hls", key, "meta.json")) as fh:
-            m = json.load(fh)
-        return int(math.ceil(m["dur"] / float(m["T"])))
-    except (OSError, IOError, ValueError, KeyError):
-        return 0
-
-
-def hls_prewarm_ahead(key, start, count):
-    """Queue transcodes for segments [start, start+count) that haven't been
-    queued yet — a rolling window that keeps the transcode front ahead of the
-    play head (across all cores) so the player never waits on a segment."""
-    if _seg_pool is None:
-        return
-    n = _segment_count(key)
-    if n <= 0:
-        return
-    with _hls_sub_guard:
-        sub = _hls_submitted.setdefault(key, set())
-        todo = [i for i in range(max(0, start), min(start + count, n)) if i not in sub]
-        sub.update(todo)
-    for i in todo:
-        try:
-            _seg_pool.submit(ensure_segment, key, i)
-        except Exception:
-            pass
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -833,9 +817,14 @@ class Handler(BaseHTTPRequestHandler):
         res = hls_prepare(f, bitrate, codec)
         if res is None:
             return self._error(502, "hls prepare failed (unknown duration?)")
-        d, key, dur, segs = res
-        # Pre-warm the first window in parallel so the player's buffer fills fast.
-        hls_prewarm_ahead(key, 0, PREWARM_SEGMENTS)
+        d, key, dur = res
+        # On a cached replay the encode is finished — serve ffmpeg's exact playlist.
+        if _hls_complete(d):
+            try:
+                with open(_hls_index(d)) as fh:
+                    return self._send_m3u8(fh.read())
+            except (OSError, IOError):
+                pass
         self._send_m3u8(hls_playlist_text(key, dur, HLS_SEGMENT_SECONDS))
 
     def _hls_file(self, key: str, name: str):
@@ -843,6 +832,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "not found")
         d = os.path.join(TRANSCODE_DIR, "hls", key)
         if name == "index.m3u8":
+            if _hls_complete(d):
+                try:
+                    with open(_hls_index(d)) as fh:
+                        return self._send_m3u8(fh.read())
+                except (OSError, IOError):
+                    return self._error(404, "not found")
             try:
                 with open(os.path.join(d, "meta.json")) as fh:
                     m = json.load(fh)
@@ -852,13 +847,22 @@ class Handler(BaseHTTPRequestHandler):
         seg = re.match(r"^seg(\d+)\.ts$", name)
         if not seg:
             return self._error(404, "not found")
-        i = int(seg.group(1))
-        # Keep the transcode front ahead of the play head (rolling window).
-        hls_prewarm_ahead(key, i + 1, PREWARM_SEGMENTS)
-        dest = ensure_segment(key, i)
-        if dest is None:
+        # Make sure the continuous encode is running, then wait for this segment.
+        # The encoder writes segments in order, so requesting ahead just waits
+        # until that point of the (gapless) stream has been encoded.
+        if ensure_encode_for_key(key) is None:
+            return self._error(404, "not found")
+        path = os.path.join(d, "seg{:04d}.ts".format(int(seg.group(1))))
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                break
+            if _hls_complete(d):  # encode finished and this segment doesn't exist
+                break
+            time.sleep(0.2)
+        if not (os.path.isfile(path) and os.path.getsize(path) > 0):
             return self._error(404, "segment unavailable")
-        self._serve_range(dest, "video/mp2t")
+        self._serve_range(path, "video/mp2t")
 
     def _track_lyrics(self, pl: str, fname: str):
         f = self._resolve_track(pl, fname)
@@ -980,7 +984,7 @@ def main(argv=None):
     if not args.root:
         parser.error("music root required: pass it as an argument or set MUSIC_ROOT")
 
-    global ROOT, TRANSCODE_DIR, FFMPEG_THREADS, _seg_pool, PREWARM_SEGMENTS
+    global ROOT, TRANSCODE_DIR, FFMPEG_THREADS
     ROOT = os.path.realpath(os.path.expanduser(args.root))
     if not os.path.isdir(ROOT):
         parser.error("not a directory: {}".format(ROOT))
@@ -988,11 +992,6 @@ def main(argv=None):
     FFMPEG_THREADS = max(0, args.ffmpeg_threads)
     TRANSCODE_DIR = args.cache_dir or os.path.join(tempfile.gettempdir(), "aura-transcode")
     os.makedirs(TRANSCODE_DIR, exist_ok=True)
-
-    # Parallel HLS segment transcoding across all cores.
-    cores = os.cpu_count() or 4
-    _seg_pool = ThreadPoolExecutor(max_workers=cores)
-    PREWARM_SEGMENTS = cores + 2
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print("AURA music server v" + VERSION)
@@ -1002,7 +1001,7 @@ def main(argv=None):
     print("  ffmpeg:   " + ("yes" if HAVE_FFMPEG else "no (.ogg/.opus won't transcode)")
           + (" (threads: " + ("auto" if FFMPEG_THREADS == 0 else str(FFMPEG_THREADS)) + ")" if HAVE_FFMPEG else ""))
     print("  codecs:   " + ", ".join(["aac/m4a"] + (["mp3"] if HAVE_LAME else [])))
-    print("  hls:      VOD playlist + on-demand parallel segments ({} cores)".format(cores))
+    print("  hls:      VOD playlist + single continuous gapless encode")
     print("  cache:    " + TRANSCODE_DIR)
     print("  serving:  http://{}:{}".format(args.host, args.port))
     print("  endpoints: /health  /playlists  /playlists/{name}  "

@@ -91,17 +91,20 @@ served as-is. `/health` reports `libmp3lame` and the available `formats`.
 ### HLS (`hls.m3u8`) — optional, low latency
 
 `?...hls.m3u8` returns a **complete VOD playlist** (all segments + `#EXT-X-ENDLIST`,
-computed from the track's duration) immediately, then transcodes each ~10s
-segment **on demand** when AVPlayer requests it (`/hls/<key>/seg####.ts`).
-Because the playlist is VOD, the player buffers several segments ahead instead
-of hugging a live edge (which is what caused stutter) — those ahead-of-time
-requests transcode **in parallel across all cores**, and the first few are
-pre-warmed on playlist load. Segments are cached under `<cache-dir>/hls/<key>/`
-for instant, fully-seekable replays. Honors `format` (aac/mp3) and `bitrate`.
-Enabled in the app via Settings → Music server → "Live streaming (HLS)".
+computed from the track's duration) immediately, so the player buffers several
+segments ahead instead of hugging a live edge (which is what caused stutter).
+The segments come from **one continuous ffmpeg HLS encode** (gapless — only the
+stream start has encoder priming), written in order; a `/hls/<key>/seg####.ts`
+request blocks until that segment has been written, then serves it. Segments are
+cached under `<cache-dir>/hls/<key>/` for instant, fully-seekable replays (and
+the replay manifest uses ffmpeg's exact EXTINF). Honors `format` (aac/mp3) and
+`bitrate`. Enabled in the app via Settings → Music server → "Live streaming (HLS)".
 
-Trade-off: segments are encoded independently, so a lossy codec can introduce
-small boundary artifacts; 10s segments keep boundaries infrequent.
+Because it's a single continuous encode, **MP3 (libmp3lame) is recommended on a
+Pi** — it encodes well above real-time so the encoder stays ahead of playback.
+(An earlier version cut segments independently with `-ss/-t`, which gave each one
+its own ~27ms of AAC priming → audible gaps + wrong EXTINF every 10s; the
+continuous encode fixes that.)
 
 - `bitrate` (kbps) selects the AAC rate; clamped to {96, 128, 160, 192, 256,
   320}, default 256. Each rate is cached separately.
